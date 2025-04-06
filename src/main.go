@@ -51,7 +51,9 @@ func (a *ListCmd) Run(ctx *kong.Context) error {
 	}
 
 	// Open the repository
-	r, err := git.PlainOpen(".")
+	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
+		DetectDotGit: true,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
 	}
@@ -175,11 +177,51 @@ func (a *AddCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
+type InitCmd struct {
+	DefaultTower string `help:"Name of the default tower to create" default:"default"`
+}
+
+func (i *InitCmd) Run(ctx *kong.Context) error {
+	// Get the repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return fmt.Errorf("failed to get current repository: %w", err)
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Check if repo already exists in configuration
+	existingRepo := FindRepoByPath(config, repoPath)
+	if existingRepo != nil {
+		fmt.Printf("Repository at '%s' already initialized in ghenga\n", repoPath)
+		return nil
+	}
+
+	// Create new repo entry in config
+	repo := FindOrCreateRepo(config, repoPath)
+
+	// Create default tower
+	tower := FindOrCreateTower(repo, i.DefaultTower)
+
+	// Save configuration
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	fmt.Printf("Initialized repository at '%s' with tower '%s'\n", repoPath, tower.Name)
+	return nil
+}
+
 type CLI struct {
 	Globals
 
 	List ListCmd `cmd:"" aliases:"ls" help:"List all towers in current repository"`
 	Add  AddCmd  `cmd:"add" help:"Add a branch to a tower in current repository"`
+	Init InitCmd `cmd:"init" help:"Initialize the current repository in ghenga config"`
 }
 
 func main() {

@@ -10,7 +10,9 @@ import (
 // GetCurrentRepository returns the path of the current git repository
 func GetCurrentRepository() (string, error) {
 	// Open the repository
-	r, err := git.PlainOpen(".")
+	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
+		DetectDotGit: true,
+	})
 	if err != nil {
 		return "", fmt.Errorf("failed to open repository: %w", err)
 	}
