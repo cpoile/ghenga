@@ -72,7 +72,7 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 	towerColor := color.New(color.FgBlue).Add(color.Bold)
 	branchColor := color.New(color.FgYellow)
 	commitColor := color.New(color.FgWhite)
-	baseCommitColor := color.New(color.FgRed)
+	baseCommitColor := color.New(color.FgCyan)
 
 	// Filter towers based on TowerName
 	var towers []*Tower
@@ -97,7 +97,7 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 
 		// Show base commit if set
 		if tower.Base != "" {
-			fmt.Printf(" [base: %s]", tower.Base[:7])
+			baseCommitColor.Printf(" [base: %s]", tower.Base[:7])
 		}
 
 		fmt.Println()
@@ -160,6 +160,11 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
+type BranchCmd struct {
+	Add AddCmd `cmd:"add" help:"Add a branch to a tower in current repository"`
+	Rm  RmCmd  `cmd:"rm" help:"Remove a branch from the current tower"`
+}
+
 type AddCmd struct {
 	Name  string `arg:"" help:"Name of the branch to add" predictor:"predictBranches"`
 	Tower string `help:"Name of the tower to add the branch to" default:"default"`
@@ -198,6 +203,65 @@ func (a *AddCmd) Run(ctx *kong.Context) error {
 	}
 
 	fmt.Printf("Added branch '%s' to tower '%s' in repository at '%s'\n", a.Name, tower.Name, repoPath)
+	return nil
+}
+
+type RmCmd struct {
+	Name string `arg:"" help:"Name of the branch to remove" predictor:"predictBranches"`
+}
+
+func (r *RmCmd) Run(ctx *kong.Context) error {
+	// Get the repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return fmt.Errorf("failed to get current repository: %w", err)
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Find repo entry in config
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
+	}
+
+	// Check if a current tower is set
+	if repo.Current == "" {
+		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
+	}
+
+	// Get current tower
+	currentTower := FindTowerByName(repo, repo.Current)
+	if currentTower == nil {
+		return fmt.Errorf("current tower '%s' not found", repo.Current)
+	}
+
+	// Check if branch exists in tower
+	branchIndex := -1
+	for i, branch := range currentTower.Branches {
+		if branch.Name == r.Name {
+			branchIndex = i
+			break
+		}
+	}
+
+	if branchIndex == -1 {
+		return fmt.Errorf("branch '%s' not found in tower '%s'", r.Name, currentTower.Name)
+	}
+
+	// Remove branch from tower (preserving order)
+	currentTower.Branches = append(currentTower.Branches[:branchIndex], currentTower.Branches[branchIndex+1:]...)
+
+	// Save configuration
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	fmt.Printf("Removed branch '%s' from tower '%s' in repository at '%s'\n", r.Name, currentTower.Name, repoPath)
 	return nil
 }
 
@@ -372,14 +436,6 @@ func (r *RenameCmd) Run(ctx *kong.Context) error {
 	}
 
 	fmt.Printf("Renamed tower from '%s' to '%s' in repository at '%s'\n", oldName, r.NewName, repoPath)
-	return nil
-}
-
-type BranchCmd struct {
-	Add AddCmd `cmd:"add" help:"Add a branch to a tower in current repository"`
-}
-
-func (b *BranchCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
