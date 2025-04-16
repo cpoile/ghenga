@@ -856,3 +856,116 @@ func TestAddCommand(t *testing.T) {
 		t.Errorf("Expected error when adding duplicate branch, but got none")
 	}
 }
+
+func TestRenameCommand(t *testing.T) {
+	// Setup test repository
+	repoPath, _ := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Test without a current tower set
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path: repoPath,
+				Towers: []*Tower{
+					{
+						Name:     "tower-1",
+						Branches: []Branch{},
+					},
+					{
+						Name:     "tower-2",
+						Branches: []Branch{},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// This should fail because no current tower is set
+	renameCmd := &RenameCmd{
+		NewName: "renamed-tower",
+	}
+	err = renameCmd.Run(mockCtx)
+	assert.Error(t, err, "Rename should fail when no current tower is set")
+	assert.Contains(t, err.Error(), "no current tower set", "Error should mention that no current tower is set")
+
+	// Now set a current tower
+	config.Repos[0].Current = "tower-1"
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Test renaming the current tower
+	err = renameCmd.Run(mockCtx)
+	require.NoError(t, err, "Failed to run Rename command")
+
+	// Verify the configuration was updated correctly
+	config, err = LoadConfig()
+	require.NoError(t, err, "Failed to load config")
+
+	// Verify the tower was renamed
+	repo := FindRepoByPath(config, repoPath)
+	require.NotNil(t, repo, "Repository not found in config")
+
+	// The current tower should be updated to the new name
+	assert.Equal(t, "renamed-tower", repo.Current, "Current tower reference should be updated")
+
+	// Check that the tower was actually renamed
+	var foundRenamedTower bool
+	for _, tower := range repo.Towers {
+		if tower.Name == "renamed-tower" {
+			foundRenamedTower = true
+			break
+		}
+	}
+	assert.True(t, foundRenamedTower, "Tower should be renamed to 'renamed-tower'")
+
+	// The old tower name should no longer exist
+	var foundOldTower bool
+	for _, tower := range repo.Towers {
+		if tower.Name == "tower-1" {
+			foundOldTower = true
+			break
+		}
+	}
+	assert.False(t, foundOldTower, "Tower 'tower-1' should no longer exist")
+
+	// Test trying to rename to a name that already exists (should fail)
+	renameCmd = &RenameCmd{
+		NewName: "tower-2",
+	}
+	err = renameCmd.Run(mockCtx)
+	assert.Error(t, err, "Expected error when renaming to a name that already exists")
+
+	// Test with a non-existent current tower
+	config.Repos[0].Current = "non-existent-tower"
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	renameCmd = &RenameCmd{
+		NewName: "another-name",
+	}
+	err = renameCmd.Run(mockCtx)
+	assert.Error(t, err, "Expected error when current tower doesn't exist")
+	assert.Contains(t, err.Error(), "not found", "Error should mention that the current tower was not found")
+}

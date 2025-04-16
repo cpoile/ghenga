@@ -302,6 +302,65 @@ func (c *CurrentCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
+type RenameCmd struct {
+	NewName string `arg:"" help:"New name for the current tower"`
+}
+
+func (r *RenameCmd) Run(ctx *kong.Context) error {
+	// Get the repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return fmt.Errorf("failed to get current repository: %w", err)
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Find repo entry in config
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
+	}
+
+	// Check if a current tower is set
+	if repo.Current == "" {
+		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
+	}
+
+	// Get current tower
+	currentTower := FindTowerByName(repo, repo.Current)
+	if currentTower == nil {
+		return fmt.Errorf("current tower '%s' not found", repo.Current)
+	}
+
+	// Check if new name already exists
+	for _, tower := range repo.Towers {
+		if tower.Name == r.NewName {
+			return fmt.Errorf("tower with name '%s' already exists", r.NewName)
+		}
+	}
+
+	// Store the old name for the output message
+	oldName := currentTower.Name
+
+	// Update the tower name
+	currentTower.Name = r.NewName
+
+	// Update the current tower reference
+	repo.Current = r.NewName
+
+	// Save configuration
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	fmt.Printf("Renamed tower from '%s' to '%s' in repository at '%s'\n", oldName, r.NewName, repoPath)
+	return nil
+}
+
 type BranchCmd struct {
 	Add AddCmd `cmd:"add" help:"Add a branch to a tower in current repository"`
 }
@@ -318,6 +377,7 @@ type CLI struct {
 	Init    InitCmd    `cmd:"init" help:"Initialize the current repository in ghenga config"`
 	New     NewCmd     `cmd:"new" help:"Create a new tower in current repository"`
 	Current CurrentCmd `cmd:"current" help:"Set the current tower"`
+	Rename  RenameCmd  `cmd:"rename" help:"Rename the current tower"`
 }
 
 func main() {
