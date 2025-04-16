@@ -15,8 +15,9 @@ type Config struct {
 
 // Repo represents a git repository configuration
 type Repo struct {
-	Path   string   `toml:"path"`
-	Towers []*Tower `toml:"towers"`
+	Path    string   `toml:"path"`
+	Current string   `toml:"current"`
+	Towers  []*Tower `toml:"towers"`
 }
 
 // Tower represents a stack of branches

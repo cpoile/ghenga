@@ -1,0 +1,858 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/alecthomas/kong"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestNewCommand(t *testing.T) {
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "ghenga-new-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Resolve symlinks in tempDir to get the real path
+	realTempDir, err := filepath.EvalSymlinks(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to resolve symlinks in tempDir: %v", err)
+	}
+
+	// Set up a test git repository
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("Failed to initialize git repository: %v", err)
+	}
+
+	// Create a temporary file and commit it
+	filePath := filepath.Join(tempDir, "test.txt")
+	if err := os.WriteFile(filePath, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	// Get the worktree
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Failed to get worktree: %v", err)
+	}
+
+	// Add the file to git
+	if _, err := wt.Add("test.txt"); err != nil {
+		t.Fatalf("Failed to add file to git: %v", err)
+	}
+
+	// Create an initial commit
+	_, err = wt.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to commit: %v", err)
+	}
+
+	// Override the config path for testing
+	originalConfigPath := ConfigPath
+	configFilePath := filepath.Join(tempDir, "config.toml")
+	ConfigPath = func() (string, error) {
+		return configFilePath, nil
+	}
+	defer func() { ConfigPath = originalConfigPath }()
+
+	// Change to the temp directory
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current directory: %v", err)
+	}
+	defer os.Chdir(originalDir)
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("Failed to change to temp directory: %v", err)
+	}
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Create a new tower using the New command
+	newCmd := &NewCmd{
+		Name: "feature-tower",
+	}
+	if err := newCmd.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to run New command: %v", err)
+	}
+
+	// Verify the configuration was saved correctly
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Verify the repo was added
+	if len(config.Repos) != 1 {
+		t.Errorf("Expected 1 repo, got %d", len(config.Repos))
+	}
+
+	repo1 := config.Repos[0]
+	// Compare the real paths to account for symlinks
+	repoPath, err := filepath.EvalSymlinks(repo1.Path)
+	if err != nil {
+		t.Fatalf("Failed to resolve symlinks in repo path: %v", err)
+	}
+	if repoPath != realTempDir {
+		t.Errorf("Expected repo path %s, got %s", realTempDir, repoPath)
+	}
+
+	// Verify the tower was added
+	if len(repo1.Towers) != 1 {
+		t.Errorf("Expected 1 tower, got %d", len(repo1.Towers))
+		for i, tower := range repo1.Towers {
+			t.Logf("Tower %d: %s", i, tower.Name)
+		}
+	}
+
+	// Find and verify the tower
+	var featureTower *Tower
+	for _, tower := range repo1.Towers {
+		if tower.Name == "feature-tower" {
+			featureTower = tower
+		}
+	}
+
+	if featureTower == nil {
+		t.Fatalf("Could not find feature-tower")
+	}
+
+	// Verify the tower has no branches initially
+	if len(featureTower.Branches) != 0 {
+		t.Errorf("Expected 0 branches in feature-tower, got %d", len(featureTower.Branches))
+	}
+
+	// Create another tower
+	newCmd2 := &NewCmd{
+		Name: "bugfix-tower",
+	}
+	if err := newCmd2.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to run New command for second tower: %v", err)
+	}
+
+	// Verify the configuration again
+	config, err = LoadConfig()
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Verify we now have two towers
+	if len(config.Repos[0].Towers) != 2 {
+		t.Errorf("Expected 2 towers, got %d", len(config.Repos[0].Towers))
+	}
+
+	// Try to create a duplicate tower (should fail)
+	duplicateCmd := &NewCmd{
+		Name: "feature-tower",
+	}
+	if err := duplicateCmd.Run(mockCtx); err == nil {
+		t.Errorf("Expected error when adding duplicate tower, but got none")
+	}
+}
+
+func TestCurrentCommand(t *testing.T) {
+	// Setup test repository
+	repoPath, _ := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with two towers
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path: repoPath,
+				Towers: []*Tower{
+					{
+						Name:     "tower-1",
+						Branches: []Branch{},
+					},
+					{
+						Name:     "tower-2",
+						Branches: []Branch{},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Test setting current tower
+	currentCmd := &CurrentCmd{
+		Tower: "tower-2",
+	}
+	err = currentCmd.Run(mockCtx)
+	require.NoError(t, err, "Failed to run Current command")
+
+	// Verify the configuration was updated correctly
+	config, err = LoadConfig()
+	require.NoError(t, err, "Failed to load config")
+
+	// Verify the current tower is set
+	repo := FindRepoByPath(config, repoPath)
+	require.NotNil(t, repo, "Repository not found in config")
+	assert.Equal(t, "tower-2", repo.Current, "Expected current tower to be 'tower-2'")
+
+	// Test setting another tower as current
+	currentCmd = &CurrentCmd{
+		Tower: "tower-1",
+	}
+	err = currentCmd.Run(mockCtx)
+	require.NoError(t, err, "Failed to run Current command")
+
+	// Verify the configuration was updated correctly
+	config, err = LoadConfig()
+	require.NoError(t, err, "Failed to load config")
+
+	// Verify the current tower is updated
+	repo = FindRepoByPath(config, repoPath)
+	assert.Equal(t, "tower-1", repo.Current, "Expected current tower to be 'tower-1'")
+
+	// Test setting a nonexistent tower (should fail)
+	invalidCmd := &CurrentCmd{
+		Tower: "nonexistent-tower",
+	}
+	err = invalidCmd.Run(mockCtx)
+	assert.Error(t, err, "Expected error when setting nonexistent tower as current")
+
+	// The current tower should still be tower-1
+	config, _ = LoadConfig()
+	repo = FindRepoByPath(config, repoPath)
+	assert.Equal(t, "tower-1", repo.Current, "Current tower should still be 'tower-1'")
+}
+
+func TestGetCurrentTower(t *testing.T) {
+	// Create a repo with multiple towers and a current tower set
+	repo := &Repo{
+		Path:    "/test/path",
+		Current: "second-tower",
+		Towers: []*Tower{
+			{
+				Name:     "first-tower",
+				Branches: []Branch{},
+			},
+			{
+				Name:     "second-tower",
+				Branches: []Branch{},
+			},
+			{
+				Name:     "third-tower",
+				Branches: []Branch{},
+			},
+		},
+	}
+
+	// Test getting the current tower
+	tower := GetCurrentTower(repo)
+	require.NotNil(t, tower, "GetCurrentTower should return a tower")
+	assert.Equal(t, "second-tower", tower.Name, "Expected to get 'second-tower'")
+
+	// Test with nonexistent current tower name
+	repo.Current = "nonexistent-tower"
+	tower = GetCurrentTower(repo)
+	require.NotNil(t, tower, "GetCurrentTower should fall back to the first tower")
+	assert.Equal(t, "first-tower", tower.Name, "Expected to get 'first-tower' as fallback")
+
+	// Test with empty current tower name
+	repo.Current = ""
+	tower = GetCurrentTower(repo)
+	require.NotNil(t, tower, "GetCurrentTower should fall back to the first tower")
+	assert.Equal(t, "first-tower", tower.Name, "Expected to get 'first-tower' as fallback")
+
+	// Test with no towers
+	repo.Towers = []*Tower{}
+	tower = GetCurrentTower(repo)
+	assert.Nil(t, tower, "GetCurrentTower should return nil when no towers exist")
+}
+
+func TestListCmd_NoTowers(t *testing.T) {
+	// Setup test repository
+	repoPath, _ := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize empty config
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path:   repoPath,
+				Towers: []*Tower{},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Run the list command
+	cmd := &ListCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(nil)
+	})
+	require.NoError(t, err)
+
+	// Verify output doesn't contain any towers
+	assert.NotContains(t, output, "Tower:")
+}
+
+func TestListCmd_OneTowerNoRepositories(t *testing.T) {
+	// Setup test repository
+	repoPath, _ := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with one tower but no branches
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path: repoPath,
+				Towers: []*Tower{
+					{
+						Name:     "test-tower",
+						Branches: []Branch{},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Run the list command
+	cmd := &ListCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(nil)
+	})
+	require.NoError(t, err)
+
+	// Verify output
+	assert.Contains(t, output, "Tower: test-tower")
+	assert.NotContains(t, output, "Initial commit")
+}
+
+func TestListCmd_OneTowerOneBranchNoCommits(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Create a branch but don't add any commits
+	branchName := "feature-branch"
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	branchRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branchName), headRef.Hash())
+	err = repo.Storer.SetReference(branchRef)
+	require.NoError(t, err)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with one tower and one branch
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path: repoPath,
+				Towers: []*Tower{
+					{
+						Name: "test-tower",
+						Branches: []Branch{
+							{Name: branchName},
+						},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Run the list command
+	cmd := &ListCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(nil)
+	})
+	require.NoError(t, err)
+
+	// Verify output
+	assert.Contains(t, output, "Tower: test-tower")
+	assert.Contains(t, output, branchName)
+	assert.Contains(t, output, "Initial commit")
+}
+
+func TestListCmd_OneTowerOneBranchWithCommits(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Create a branch with commits
+	branchName := "feature-branch"
+	createTestBranch(t, repo, branchName, 3)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with one tower and one branch
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path: repoPath,
+				Towers: []*Tower{
+					{
+						Name: "test-tower",
+						Branches: []Branch{
+							{Name: branchName},
+						},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Run the list command
+	cmd := &ListCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(nil)
+	})
+	require.NoError(t, err)
+
+	// Verify output
+	assert.Contains(t, output, "Tower: test-tower")
+	assert.Contains(t, output, branchName)
+	assert.Contains(t, output, "Add file-feature-branch-0.txt")
+	assert.Contains(t, output, "Add file-feature-branch-1.txt")
+	assert.Contains(t, output, "Add file-feature-branch-2.txt")
+
+	// Verify ordering - the most recent commit (2) should come before older commits (1 and 0)
+	pos2 := strings.Index(output, "Add file-feature-branch-2.txt")
+	pos1 := strings.Index(output, "Add file-feature-branch-1.txt")
+	pos0 := strings.Index(output, "Add file-feature-branch-0.txt")
+	assert.True(t, pos2 < pos1, "Most recent commit should be listed first")
+	assert.True(t, pos1 < pos0, "Commits should be in reverse chronological order")
+}
+
+func TestListCmd_MultipleTowersMultipleBranches(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Create branches with commits
+	createTestBranch(t, repo, "feature-1", 2)
+	createTestBranch(t, repo, "feature-2", 3)
+	createTestBranch(t, repo, "bugfix-1", 1)
+	createTestBranch(t, repo, "bugfix-2", 2)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with multiple towers and branches
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path: repoPath,
+				Towers: []*Tower{
+					{
+						Name: "feature-tower",
+						Branches: []Branch{
+							{Name: "feature-1"},
+							{Name: "feature-2"},
+						},
+					},
+					{
+						Name: "bugfix-tower",
+						Branches: []Branch{
+							{Name: "bugfix-1"},
+							{Name: "bugfix-2"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Run the list command
+	cmd := &ListCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(nil)
+	})
+	require.NoError(t, err)
+
+	// Verify output
+	assert.Contains(t, output, "Tower: feature-tower")
+	assert.Contains(t, output, "Tower: bugfix-tower")
+
+	// Check branch ordering (reverse order)
+	feature2Index := strings.Index(output, "feature-2")
+	feature1Index := strings.Index(output, "feature-1")
+	assert.True(t, feature2Index < feature1Index, "feature-2 should be listed before feature-1")
+
+	bugfix2Index := strings.Index(output, "bugfix-2")
+	bugfix1Index := strings.Index(output, "bugfix-1")
+	assert.True(t, bugfix2Index < bugfix1Index, "bugfix-2 should be listed before bugfix-1")
+
+	// Check for commit messages
+	assert.Contains(t, output, "Add file-feature-1-0.txt")
+	assert.Contains(t, output, "Add file-feature-1-1.txt")
+	assert.Contains(t, output, "Add file-feature-2-0.txt")
+	assert.Contains(t, output, "Add file-feature-2-1.txt")
+	assert.Contains(t, output, "Add file-feature-2-2.txt")
+	assert.Contains(t, output, "Add file-bugfix-1-0.txt")
+	assert.Contains(t, output, "Add file-bugfix-2-0.txt")
+	assert.Contains(t, output, "Add file-bugfix-2-1.txt")
+
+	// Verify ordering of commits within feature-2
+	f2Pos2 := strings.Index(output, "Add file-feature-2-2.txt")
+	f2Pos1 := strings.Index(output, "Add file-feature-2-1.txt")
+	f2Pos0 := strings.Index(output, "Add file-feature-2-0.txt")
+	assert.True(t, f2Pos2 < f2Pos1, "Most recent commit should be listed first")
+	assert.True(t, f2Pos1 < f2Pos0, "Commits should be in reverse chronological order")
+}
+
+func TestListCmd_FilterByTowerName(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Create branches with commits
+	createTestBranch(t, repo, "feature-1", 2)
+	createTestBranch(t, repo, "bugfix-1", 1)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with multiple towers and branches
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path: repoPath,
+				Towers: []*Tower{
+					{
+						Name: "feature-tower",
+						Branches: []Branch{
+							{Name: "feature-1"},
+						},
+					},
+					{
+						Name: "bugfix-tower",
+						Branches: []Branch{
+							{Name: "bugfix-1"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Run the list command with tower filter
+	cmd := &ListCmd{TowerName: "feature-tower"}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(nil)
+	})
+	require.NoError(t, err)
+
+	// Verify output
+	assert.Contains(t, output, "Tower: feature-tower")
+	assert.NotContains(t, output, "Tower: bugfix-tower")
+	assert.Contains(t, output, "feature-1")
+	assert.NotContains(t, output, "bugfix-1")
+	assert.Contains(t, output, "Add file-feature-1-0.txt")
+	assert.Contains(t, output, "Add file-feature-1-1.txt")
+}
+
+func TestAddCommand(t *testing.T) {
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "ghenga-add-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Resolve symlinks in tempDir to get the real path
+	realTempDir, err := filepath.EvalSymlinks(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to resolve symlinks in tempDir: %v", err)
+	}
+
+	// Set up a test git repository
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("Failed to initialize git repository: %v", err)
+	}
+
+	// Create a temporary file and commit it
+	filePath := filepath.Join(tempDir, "test.txt")
+	if err := os.WriteFile(filePath, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	// Get the worktree
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Failed to get worktree: %v", err)
+	}
+
+	// Add the file to git
+	if _, err := wt.Add("test.txt"); err != nil {
+		t.Fatalf("Failed to add file to git: %v", err)
+	}
+
+	// Create an initial commit
+	_, err = wt.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to commit: %v", err)
+	}
+
+	// Override the config path for testing
+	originalConfigPath := ConfigPath
+	configFilePath := filepath.Join(tempDir, "config.toml")
+	ConfigPath = func() (string, error) {
+		return configFilePath, nil
+	}
+	defer func() { ConfigPath = originalConfigPath }()
+
+	// Change to the temp directory
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current directory: %v", err)
+	}
+	defer os.Chdir(originalDir)
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("Failed to change to temp directory: %v", err)
+	}
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Add a branch using the Add command
+	addCmd := &AddCmd{
+		Name:  "feature-x",
+		Tower: "test-tower",
+	}
+	if err := addCmd.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to run Add command: %v", err)
+	}
+
+	// Add another branch to the same tower
+	addCmd2 := &AddCmd{
+		Name:  "feature-y",
+		Tower: "test-tower",
+	}
+	if err := addCmd2.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to run Add command for second branch: %v", err)
+	}
+
+	// Add a branch to a different tower
+	addCmd3 := &AddCmd{
+		Name:  "bugfix-z",
+		Tower: "bugfix-tower",
+	}
+	if err := addCmd3.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to run Add command for branch in different tower: %v", err)
+	}
+
+	// Verify the configuration was saved correctly
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Verify the repo was added
+	if len(config.Repos) != 1 {
+		t.Errorf("Expected 1 repo, got %d", len(config.Repos))
+	}
+
+	repo1 := config.Repos[0]
+	// Compare the real paths to account for symlinks
+	repoPath, err := filepath.EvalSymlinks(repo1.Path)
+	if err != nil {
+		t.Fatalf("Failed to resolve symlinks in repo path: %v", err)
+	}
+	if repoPath != realTempDir {
+		t.Errorf("Expected repo path %s, got %s", realTempDir, repoPath)
+	}
+
+	// Verify the towers were added
+	if len(repo1.Towers) != 2 {
+		t.Errorf("Expected 2 towers, got %d", len(repo1.Towers))
+		for i, tower := range repo1.Towers {
+			t.Logf("Tower %d: %s", i, tower.Name)
+		}
+	}
+
+	// Find and verify the towers and branches
+	var testTower, bugfixTower *Tower
+	for _, tower := range repo1.Towers {
+		if tower.Name == "test-tower" {
+			testTower = tower
+		} else if tower.Name == "bugfix-tower" {
+			bugfixTower = tower
+		}
+	}
+
+	if testTower == nil {
+		t.Fatalf("Could not find test-tower")
+	}
+	if bugfixTower == nil {
+		t.Fatalf("Could not find bugfix-tower")
+	}
+
+	// Verify branches in test-tower
+	if len(testTower.Branches) != 2 {
+		t.Errorf("Expected 2 branches in test-tower, got %d", len(testTower.Branches))
+	}
+	foundFeatureX := false
+	foundFeatureY := false
+	for _, branch := range testTower.Branches {
+		if branch.Name == "feature-x" {
+			foundFeatureX = true
+		} else if branch.Name == "feature-y" {
+			foundFeatureY = true
+		}
+	}
+	if !foundFeatureX {
+		t.Errorf("Could not find branch feature-x in test-tower")
+	}
+	if !foundFeatureY {
+		t.Errorf("Could not find branch feature-y in test-tower")
+	}
+
+	// Verify branch in bugfix-tower
+	if len(bugfixTower.Branches) != 1 {
+		t.Errorf("Expected 1 branch in bugfix-tower, got %d", len(bugfixTower.Branches))
+	}
+	if len(bugfixTower.Branches) > 0 && bugfixTower.Branches[0].Name != "bugfix-z" {
+		t.Errorf("Expected branch name bugfix-z, got %s", bugfixTower.Branches[0].Name)
+	}
+
+	// Test adding a duplicate branch (should fail)
+	duplicateCmd := &AddCmd{
+		Name:  "feature-x",
+		Tower: "test-tower",
+	}
+	if err := duplicateCmd.Run(mockCtx); err == nil {
+		t.Errorf("Expected error when adding duplicate branch, but got none")
+	}
+}

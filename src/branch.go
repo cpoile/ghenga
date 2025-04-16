@@ -99,3 +99,34 @@ func ContainsBranch(tower *Tower, branchName string) bool {
 	}
 	return false
 }
+
+// SetCurrentTower sets the current tower for a repository
+func SetCurrentTower(repo *Repo, towerName string) error {
+	// Check if the tower exists
+	tower := FindTowerByName(repo, towerName)
+	if tower == nil {
+		return fmt.Errorf("tower '%s' not found", towerName)
+	}
+
+	// Set the current tower
+	repo.Current = towerName
+	return nil
+}
+
+// GetCurrentTower gets the current tower for a repository
+// If no current tower is set, returns the first tower or nil if no towers exist
+func GetCurrentTower(repo *Repo) *Tower {
+	if repo.Current != "" {
+		tower := FindTowerByName(repo, repo.Current)
+		if tower != nil {
+			return tower
+		}
+	}
+
+	// Fallback to first tower if available
+	if len(repo.Towers) > 0 {
+		return repo.Towers[0]
+	}
+
+	return nil
+}

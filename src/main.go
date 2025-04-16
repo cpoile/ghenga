@@ -87,7 +87,14 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 
 	// Iterate through towers
 	for _, tower := range towers {
-		towerColor.Printf("Tower: %s\n", tower.Name)
+		towerColor.Printf("Tower: %s", tower.Name)
+
+		// Check if this is the current tower
+		if repo.Current == tower.Name {
+			currentBranch.Printf(" (current)\n")
+		} else {
+			fmt.Println()
+		}
 
 		// Iterate through branches in reverse order
 		for i := len(tower.Branches) - 1; i >= 0; i-- {
@@ -258,6 +265,43 @@ func (n *NewCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
+type CurrentCmd struct {
+	Tower string `arg:"" help:"Name of the tower to set as current" predictor:"predictTowers"`
+}
+
+func (c *CurrentCmd) Run(ctx *kong.Context) error {
+	// Get the repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return fmt.Errorf("failed to get current repository: %w", err)
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Find repo entry in config
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
+	}
+
+	// Set the current tower
+	if err := SetCurrentTower(repo, c.Tower); err != nil {
+		return err
+	}
+
+	// Save configuration
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	fmt.Printf("Set current tower to '%s' in repository at '%s'\n", c.Tower, repoPath)
+	return nil
+}
+
 type BranchCmd struct {
 	Add AddCmd `cmd:"add" help:"Add a branch to a tower in current repository"`
 }
@@ -269,10 +313,11 @@ func (b *BranchCmd) Run(ctx *kong.Context) error {
 type CLI struct {
 	Globals
 
-	List   ListCmd   `cmd:"" help:"List all towers in current repository"`
-	Branch BranchCmd `cmd:"branch" help:"Operate on branches in the current working tower: add, remove, etc."`
-	Init   InitCmd   `cmd:"init" help:"Initialize the current repository in ghenga config"`
-	New    NewCmd    `cmd:"new" help:"Create a new tower in current repository"`
+	List    ListCmd    `cmd:"" help:"List all towers in current repository"`
+	Branch  BranchCmd  `cmd:"branch" help:"Operate on branches in the current working tower: add, remove, etc."`
+	Init    InitCmd    `cmd:"init" help:"Initialize the current repository in ghenga config"`
+	New     NewCmd     `cmd:"new" help:"Create a new tower in current repository"`
+	Current CurrentCmd `cmd:"current" help:"Set the current tower"`
 }
 
 func main() {
@@ -282,7 +327,7 @@ func main() {
 		fmt.Printf("Error loading configuration: %v\n", err)
 	}
 
-	// Create kong app, but don’t run arg parsing yet.
+	// Create kong app, but don't run arg parsing yet.
 	cli := CLI{
 		Globals: Globals{
 			Version: VersionFlag(Version),
