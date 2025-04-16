@@ -20,11 +20,19 @@ func (l TowerLister) Predict(args complete.Args) []string {
 		return nil
 	}
 
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return nil
+	}
+
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return nil
+	}
+
 	towers := make([]string, 0)
-	for _, repo := range config.Repos {
-		for _, tower := range repo.Towers {
-			towers = append(towers, tower.Name)
-		}
+	for _, tower := range repo.Towers {
+		towers = append(towers, tower.Name)
 	}
 
 	return towers
