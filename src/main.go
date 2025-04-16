@@ -72,6 +72,7 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 	towerColor := color.New(color.FgBlue).Add(color.Bold)
 	branchColor := color.New(color.FgYellow)
 	commitColor := color.New(color.FgWhite)
+	baseCommitColor := color.New(color.FgRed)
 
 	// Filter towers based on TowerName
 	var towers []*Tower
@@ -91,10 +92,15 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 
 		// Check if this is the current tower
 		if repo.Current == tower.Name {
-			currentBranch.Printf(" (current)\n")
-		} else {
-			fmt.Println()
+			currentBranch.Printf(" (current)")
 		}
+
+		// Show base commit if set
+		if tower.Base != "" {
+			fmt.Printf(" [base: %s]", tower.Base[:7])
+		}
+
+		fmt.Println()
 
 		// Iterate through branches in reverse order
 		for i := len(tower.Branches) - 1; i >= 0; i-- {
@@ -137,7 +143,15 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 			for j := 0; j < len(commits); j++ {
 				commit := commits[j]
 				message := strings.Split(commit.Message, "\n")[0]
-				commitColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
+
+				// Check if this is the base commit
+				if tower.Base != "" && commit.Hash.String() == tower.Base {
+					baseCommitColor.Printf("    %s %s (base)\n", commit.Hash.String()[:7], message)
+					// Stop displaying commits after the base
+					break
+				} else {
+					commitColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
+				}
 			}
 		}
 		fmt.Println()
@@ -369,6 +383,66 @@ func (b *BranchCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
+type BaseCmd struct {
+	Commit string `arg:"" help:"Commit hash or reference to set as the tower's base" predictor:"predictGitRefs"`
+}
+
+func (b *BaseCmd) Run(ctx *kong.Context) error {
+	// Get the repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return fmt.Errorf("failed to get current repository: %w", err)
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Find repo entry in config
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
+	}
+
+	// Check if a current tower is set
+	if repo.Current == "" {
+		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
+	}
+
+	// Get current tower
+	currentTower := FindTowerByName(repo, repo.Current)
+	if currentTower == nil {
+		return fmt.Errorf("current tower '%s' not found", repo.Current)
+	}
+
+	// Open the git repository to validate the commit exists
+	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
+		DetectDotGit: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	// Try to resolve the commit reference
+	hash, err := r.ResolveRevision(plumbing.Revision(b.Commit))
+	if err != nil {
+		return fmt.Errorf("failed to resolve commit '%s': %w", b.Commit, err)
+	}
+
+	// Set the base commit for the tower
+	currentTower.Base = hash.String()
+
+	// Save configuration
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	fmt.Printf("Set base commit for tower '%s' to '%s' in repository at '%s'\n", currentTower.Name, currentTower.Base, repoPath)
+	return nil
+}
+
 type CLI struct {
 	Globals
 
@@ -378,6 +452,7 @@ type CLI struct {
 	New     NewCmd     `cmd:"new" help:"Create a new tower in current repository"`
 	Current CurrentCmd `cmd:"current" help:"Set the current tower"`
 	Rename  RenameCmd  `cmd:"rename" help:"Rename the current tower"`
+	Base    BaseCmd    `cmd:"base" help:"Set the tower's base commit"`
 }
 
 func main() {
@@ -406,7 +481,7 @@ func main() {
 
 	// Register completions. This must happen before the parsing step, so that
 	// tab completion invocations can be intercepted.
-	kongcompletion.Register(parser, predictTowers, predictBranches)
+	kongcompletion.Register(parser, predictTowers, predictBranches, predictGitRefs)
 
 	// Proceed as usual with parsing arguments and running the app.
 	ctx, err := parser.Parse(os.Args[1:])

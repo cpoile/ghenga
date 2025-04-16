@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	kongcompletion "github.com/jotaen/kong-completion"
 	"github.com/posener/complete"
 )
@@ -70,4 +71,137 @@ func (l BranchLister) Predict(args complete.Args) []string {
 	})
 
 	return branches
+}
+
+var predictGitRefs = kongcompletion.WithPredictor(
+	"predictGitRefs",
+	GitRefLister{},
+)
+
+type GitRefLister struct{}
+
+func (l GitRefLister) Predict(args complete.Args) []string {
+	// Open the repository
+	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
+		DetectDotGit: true,
+	})
+	if err != nil {
+		return nil
+	}
+
+	gitRefs := []string{}
+
+	// Get current repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return gitRefs
+	}
+
+	// Load configuration to find current tower
+	config, err := LoadConfig()
+	if err != nil {
+		return gitRefs
+	}
+
+	// Find repo in config
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return gitRefs
+	}
+
+	// Get current tower
+	var currentTower *Tower
+	if repo.Current != "" {
+		currentTower = FindTowerByName(repo, repo.Current)
+	}
+
+	// If no current tower or tower has no branches, try to use current HEAD
+	if currentTower == nil || len(currentTower.Branches) == 0 {
+		// Get the current HEAD reference as fallback
+		headRef, err := r.Head()
+		if err != nil {
+			return gitRefs
+		}
+
+		// Add the current branch name if it's a branch
+		if headRef.Name().IsBranch() {
+			gitRefs = append(gitRefs, headRef.Name().Short())
+		}
+
+		// Get commits from log, ordered by recency
+		logIter, err := r.Log(&git.LogOptions{
+			From:  headRef.Hash(),
+			Order: git.LogOrderCommitterTime,
+		})
+		if err != nil {
+			return gitRefs
+		}
+
+		seenCommits := make(map[string]bool)
+		commitCount := 0
+
+		// Process commits
+		logIter.ForEach(func(c *object.Commit) error {
+			if commitCount >= 50 {
+				return plumbing.ErrObjectNotFound // Stop after 50 items
+			}
+
+			hash := c.Hash.String()
+			shortHash := hash[:7]
+
+			// Add the commit hash if we haven't seen it yet
+			if !seenCommits[shortHash] {
+				gitRefs = append(gitRefs, shortHash)
+				seenCommits[shortHash] = true
+				commitCount++
+			}
+
+			return nil
+		})
+
+		return gitRefs
+	}
+
+	// Use the first branch in the tower
+	firstBranchName := currentTower.Branches[0].Name
+	gitRefs = append(gitRefs, firstBranchName)
+
+	// Get the branch reference
+	branchRef, err := r.Reference(plumbing.NewBranchReferenceName(firstBranchName), true)
+	if err != nil {
+		return gitRefs
+	}
+
+	// Get commits from log, starting from the first branch, ordered by recency
+	logIter, err := r.Log(&git.LogOptions{
+		From:  branchRef.Hash(),
+		Order: git.LogOrderCommitterTime,
+	})
+	if err != nil {
+		return gitRefs
+	}
+
+	seenCommits := make(map[string]bool)
+	commitCount := 0
+
+	// Process commits
+	logIter.ForEach(func(c *object.Commit) error {
+		if commitCount >= 50 {
+			return plumbing.ErrObjectNotFound // Stop after 50 items
+		}
+
+		hash := c.Hash.String()
+		shortHash := hash[:7]
+
+		// Add the commit hash if we haven't seen it yet
+		if !seenCommits[shortHash] {
+			gitRefs = append(gitRefs, shortHash)
+			seenCommits[shortHash] = true
+			commitCount++
+		}
+
+		return nil
+	})
+
+	return gitRefs
 }

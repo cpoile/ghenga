@@ -969,3 +969,111 @@ func TestRenameCommand(t *testing.T) {
 	assert.Error(t, err, "Expected error when current tower doesn't exist")
 	assert.Contains(t, err.Error(), "not found", "Error should mention that the current tower was not found")
 }
+
+func TestBaseCommand(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Create a test commit to use as base
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	// Create a file
+	filePath := filepath.Join(repoPath, "base-test.txt")
+	err = os.WriteFile(filePath, []byte("base test content"), 0644)
+	require.NoError(t, err)
+
+	// Add and commit the file
+	_, err = wt.Add("base-test.txt")
+	require.NoError(t, err)
+
+	commit, err := wt.Commit("Base commit for test", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err)
+
+	// Get the commit as a string
+	baseCommit := commit.String()
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with a tower and set it as current
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path:    repoPath,
+				Current: "test-tower",
+				Towers: []*Tower{
+					{
+						Name:     "test-tower",
+						Branches: []Branch{},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Test setting base commit
+	baseCmd := &BaseCmd{
+		Commit: baseCommit,
+	}
+	err = baseCmd.Run(mockCtx)
+	require.NoError(t, err, "Failed to run Base command")
+
+	// Verify the configuration was updated correctly
+	config, err = LoadConfig()
+	require.NoError(t, err, "Failed to load config")
+
+	// Verify the base commit was set
+	repo1 := FindRepoByPath(config, repoPath)
+	require.NotNil(t, repo1, "Repository not found in config")
+
+	tower := FindTowerByName(repo1, "test-tower")
+	require.NotNil(t, tower, "Tower not found in config")
+
+	assert.Equal(t, baseCommit, tower.Base, "Base commit should be set correctly")
+
+	// Test with no current tower set
+	repo1.Current = ""
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	err = baseCmd.Run(mockCtx)
+	assert.Error(t, err, "Base should fail when no current tower is set")
+	assert.Contains(t, err.Error(), "no current tower set", "Error should mention that no current tower is set")
+
+	// Test with non-existent commit
+	repo1.Current = "test-tower"
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	invalidBaseCmd := &BaseCmd{
+		Commit: "nonexistentcommit",
+	}
+	err = invalidBaseCmd.Run(mockCtx)
+	assert.Error(t, err, "Base should fail with non-existent commit")
+	assert.Contains(t, err.Error(), "failed to resolve commit", "Error should mention that the commit could not be resolved")
+}

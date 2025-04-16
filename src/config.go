@@ -23,6 +23,7 @@ type Repo struct {
 // Tower represents a stack of branches
 type Tower struct {
 	Name     string   `toml:"name"`
+	Base     string   `toml:"base"`
 	Branches []Branch `toml:"branches"`
 }
 
