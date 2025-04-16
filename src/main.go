@@ -259,13 +259,21 @@ func (n *NewCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
+type BranchCmd struct {
+	Add AddCmd `cmd:"add" help:"Add a branch to a tower in current repository"`
+}
+
+func (b *BranchCmd) Run(ctx *kong.Context) error {
+	return nil
+}
+
 type CLI struct {
 	Globals
 
-	List ListCmd `cmd:"" help:"List all towers in current repository"`
-	Add  AddCmd  `cmd:"add" help:"Add a branch to a tower in current repository"`
-	Init InitCmd `cmd:"init" help:"Initialize the current repository in ghenga config"`
-	New  NewCmd  `cmd:"new" help:"Create a new tower in current repository"`
+	List   ListCmd   `cmd:"" help:"List all towers in current repository"`
+	Branch BranchCmd `cmd:"branch" help:"Operate on branches in the current working tower: add, remove, etc."`
+	Init   InitCmd   `cmd:"init" help:"Initialize the current repository in ghenga config"`
+	New    NewCmd    `cmd:"new" help:"Create a new tower in current repository"`
 }
 
 func main() {
@@ -275,7 +283,7 @@ func main() {
 		fmt.Printf("Error loading configuration: %v\n", err)
 	}
 
-	// 1. Create kong app, but don’t run arg parsing yet.
+	// Create kong app, but don’t run arg parsing yet.
 	cli := CLI{
 		Globals: Globals{
 			Version: VersionFlag(Version),
@@ -292,11 +300,11 @@ func main() {
 			"version": Version,
 		})
 
-	// 2. Register completions. This must happen before the parsing step, so that
+	// Register completions. This must happen before the parsing step, so that
 	// tab completion invocations can be intercepted.
 	kongcompletion.Register(parser, predictTowers)
 
-	// 3. Now, proceed as usual with parsing arguments and running the app.
+	// Proceed as usual with parsing arguments and running the app.
 	ctx, err := parser.Parse(os.Args[1:])
 	parser.FatalIfErrorf(err)
 
