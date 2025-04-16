@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -9,6 +10,8 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	kongcompletion "github.com/jotaen/kong-completion"
+	"github.com/posener/complete"
 )
 
 var Version = "0.1.0"
@@ -24,14 +27,15 @@ func (v VersionFlag) BeforeApply(app *kong.Kong, vars kong.Vars) error {
 }
 
 type Globals struct {
-	Version VersionFlag `name:"version" help:"Print version information and quit"`
+	Version    VersionFlag               `name:"version" help:"Print version information and quit"`
+	Completion kongcompletion.Completion `cmd:"" help:"Outputs shell code for initialising tab completions" completion-shell-default:"false"`
 }
 
 type ListCmd struct {
-	TowerName string `arg:"" optional:"" help:"Name of the tower to list. If not provided, all towers will be listed."`
+	TowerName string `arg:"" optional:"" help:"Name of the tower to list. If not provided, all towers will be listed." predictor:"predictTowers"`
 }
 
-func (a *ListCmd) Run(ctx *kong.Context) error {
+func (l *ListCmd) Run(ctx *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -72,10 +76,10 @@ func (a *ListCmd) Run(ctx *kong.Context) error {
 
 	// Filter towers based on TowerName
 	var towers []*Tower
-	if a.TowerName != "" {
-		tower := FindTowerByName(repo, a.TowerName)
+	if l.TowerName != "" {
+		tower := FindTowerByName(repo, l.TowerName)
 		if tower == nil {
-			return fmt.Errorf("tower '%s' not found", a.TowerName)
+			return fmt.Errorf("tower '%s' not found", l.TowerName)
 		}
 		towers = []*Tower{tower}
 	} else {
@@ -231,13 +235,13 @@ func main() {
 		fmt.Printf("Error loading configuration: %v\n", err)
 	}
 
+	// 1. Create kong app, but don’t run arg parsing yet.
 	cli := CLI{
 		Globals: Globals{
 			Version: VersionFlag(Version),
 		},
 	}
-
-	ctx := kong.Parse(&cli,
+	parser := kong.Must(&cli,
 		kong.Name("ghenga"),
 		kong.Description("A tool to manage stacked pull requests on Github"),
 		kong.UsageOnError(),
@@ -247,6 +251,38 @@ func main() {
 		kong.Vars{
 			"version": Version,
 		})
+
+	// 2. Register completions. This must happen before the parsing step, so that
+	// tab completion invocations can be intercepted.
+	kongcompletion.Register(parser, predictTowers)
+
+	// 3. Now, proceed as usual with parsing arguments and running the app.
+	ctx, err := parser.Parse(os.Args[1:])
+	parser.FatalIfErrorf(err)
+
 	err = ctx.Run(&cli.Globals)
 	ctx.FatalIfErrorf(err)
+}
+
+var predictTowers = kongcompletion.WithPredictor(
+	"predictTowers",
+	TowerLister{},
+)
+
+type TowerLister struct{}
+
+func (l TowerLister) Predict(args complete.Args) []string {
+	config, err := LoadConfig()
+	if err != nil {
+		return nil
+	}
+
+	towers := make([]string, 0)
+	for _, repo := range config.Repos {
+		for _, tower := range repo.Towers {
+			towers = append(towers, tower.Name)
+		}
+	}
+
+	return towers
 }
