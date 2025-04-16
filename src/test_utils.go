@@ -99,11 +99,15 @@ func mockedConfigPath(tempPath string) ConfigPathFunc {
 
 // CaptureOutput captures stdout during function execution
 func CaptureOutput(f func() error) (string, error) {
+	// Save the original stdout and color.Output
+	oldStdout := os.Stdout
+	oldColorOutput := color.Output
 
 	// Create a pipe
 	r, w, _ := os.Pipe()
 
-	// The color package writes to os.Stdout by default, so we need to redirect it to the pipe
+	// Redirect both stdout and color.Output to the pipe
+	os.Stdout = w
 	color.Output = w
 
 	// Run the function
@@ -115,8 +119,9 @@ func CaptureOutput(f func() error) (string, error) {
 	// Close the writer to get all output
 	w.Close()
 
-	// Restore color's default output
-	color.Output = os.Stdout
+	// Restore original stdout and color.Output
+	os.Stdout = oldStdout
+	color.Output = oldColorOutput
 
 	// Read the output
 	var buf bytes.Buffer

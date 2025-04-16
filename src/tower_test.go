@@ -897,3 +897,226 @@ func TestBaseCommand(t *testing.T) {
 	assert.Error(t, err, "Base should fail with non-existent commit")
 	assert.Contains(t, err.Error(), "failed to resolve commit", "Error should mention that the commit could not be resolved")
 }
+
+func TestRmTowerCommand(t *testing.T) {
+	// Setup test repository
+	repoPath, _ := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with multiple towers including the current tower
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path:    repoPath,
+				Current: "tower-1",
+				Towers: []*Tower{
+					{
+						Name: "tower-1",
+						Branches: []Branch{
+							{Name: "branch-1"},
+							{Name: "branch-2"},
+						},
+					},
+					{
+						Name: "tower-2",
+						Branches: []Branch{
+							{Name: "branch-3"},
+						},
+					},
+					{
+						Name:     "tower-3",
+						Branches: []Branch{},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Test 1: Remove a non-current tower with confirmation
+	// Mock standard input with "y" for yes
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	go func() {
+		w.Write([]byte("y\n"))
+		w.Close()
+	}()
+
+	rmCmd := &RmTowerCmd{
+		Name: "tower-3",
+	}
+
+	output, err := CaptureOutput(func() error {
+		return rmCmd.Run(mockCtx)
+	})
+	require.NoError(t, err, "Failed to run Rm command for a non-current tower")
+
+	// Restore stdin
+	os.Stdin = oldStdin
+
+	// Verify the output contains the warning
+	assert.Contains(t, output, "WARNING", "Output should contain a warning message")
+	assert.Contains(t, output, "tower-3", "Output should mention the tower being removed")
+	assert.Contains(t, output, "Removed tower 'tower-3'", "Output should confirm removal")
+	assert.NotContains(t, output, "branch", "Output should not mention branches for an empty tower")
+
+	// Verify the configuration was updated correctly
+	config, err = LoadConfig()
+	require.NoError(t, err, "Failed to load config")
+
+	// Verify the tower was removed
+	repo := FindRepoByPath(config, repoPath)
+	require.NotNil(t, repo, "Repository not found in config")
+
+	// Check that only two towers remain
+	assert.Equal(t, 2, len(repo.Towers), "Expected 2 towers after removal")
+
+	// Check that the removed tower doesn't exist
+	var foundTower3 bool
+	for _, tower := range repo.Towers {
+		if tower.Name == "tower-3" {
+			foundTower3 = true
+			break
+		}
+	}
+	assert.False(t, foundTower3, "Tower 'tower-3' should no longer exist")
+
+	// Current tower should still be set
+	assert.Equal(t, "tower-1", repo.Current, "Current tower should still be 'tower-1'")
+
+	// Test 2: Remove the current tower with confirmation
+	// Mock standard input again with "y" for yes
+	r, w, _ = os.Pipe()
+	os.Stdin = r
+	go func() {
+		w.Write([]byte("y\n"))
+		w.Close()
+	}()
+
+	rmCurrentCmd := &RmTowerCmd{
+		Name: "tower-1",
+	}
+
+	output, err = CaptureOutput(func() error {
+		return rmCurrentCmd.Run(mockCtx)
+	})
+	require.NoError(t, err, "Failed to run Rm command for the current tower")
+
+	// Restore stdin
+	os.Stdin = oldStdin
+
+	// Verify the output contains the correct warnings
+	assert.Contains(t, output, "WARNING", "Output should contain a warning message")
+	assert.Contains(t, output, "current tower", "Output should mention it's the current tower")
+	assert.Contains(t, output, "2 branch", "Output should mention the number of branches")
+	assert.Contains(t, output, "Removed tower 'tower-1'", "Output should confirm removal")
+	assert.Contains(t, output, "Note: Removed the current tower", "Output should warn about removing current tower")
+
+	// Verify the configuration was updated correctly
+	config, err = LoadConfig()
+	require.NoError(t, err, "Failed to load config")
+
+	repo = FindRepoByPath(config, repoPath)
+
+	// Only one tower should remain
+	assert.Equal(t, 1, len(repo.Towers), "Expected 1 tower after removing current tower")
+
+	// Current tower reference should be empty
+	assert.Equal(t, "", repo.Current, "Current tower should be unset after removing it")
+
+	// Test 3: Try to remove a tower but cancel the operation
+	// Mock standard input with "n" for no
+	r, w, _ = os.Pipe()
+	os.Stdin = r
+	go func() {
+		w.Write([]byte("n\n"))
+		w.Close()
+	}()
+
+	cancelCmd := &RmTowerCmd{
+		Name: "tower-2",
+	}
+
+	output, err = CaptureOutput(func() error {
+		return cancelCmd.Run(mockCtx)
+	})
+	require.NoError(t, err, "Command should run without error even when cancelled")
+
+	// Restore stdin
+	os.Stdin = oldStdin
+
+	// Verify the output indicates cancellation
+	assert.Contains(t, output, "WARNING", "Output should contain a warning message")
+	assert.Contains(t, output, "tower-2", "Output should mention the tower name")
+	assert.Contains(t, output, "cancelled", "Output should indicate operation was cancelled")
+
+	// Verify the configuration was not changed
+	config, err = LoadConfig()
+	require.NoError(t, err, "Failed to load config")
+
+	repo = FindRepoByPath(config, repoPath)
+	assert.Equal(t, 1, len(repo.Towers), "Expected tower to still exist after cancellation")
+	assert.Equal(t, "tower-2", repo.Towers[0].Name, "tower-2 should still exist")
+
+	// Test 4: Try to remove a non-existent tower
+	rmNonExistentCmd := &RmTowerCmd{
+		Name: "non-existent-tower",
+	}
+	err = rmNonExistentCmd.Run(mockCtx)
+	assert.Error(t, err, "Expected error when removing non-existent tower")
+	assert.Contains(t, err.Error(), "not found", "Error should mention that the tower was not found")
+
+	// Test 5: Remove the last tower with confirmation
+	// Mock standard input with "y" for yes
+	r, w, _ = os.Pipe()
+	os.Stdin = r
+	go func() {
+		w.Write([]byte("y\n"))
+		w.Close()
+	}()
+
+	rmLastCmd := &RmTowerCmd{
+		Name: "tower-2",
+	}
+
+	output, err = CaptureOutput(func() error {
+		return rmLastCmd.Run(mockCtx)
+	})
+	require.NoError(t, err, "Failed to run Rm command for the last tower")
+
+	// Restore stdin
+	os.Stdin = oldStdin
+
+	// Verify the output
+	assert.Contains(t, output, "WARNING", "Output should contain a warning message")
+	assert.Contains(t, output, "1 branch", "Output should mention the number of branches")
+	assert.Contains(t, output, "Removed tower 'tower-2'", "Output should confirm removal")
+
+	// Verify the configuration was updated correctly
+	config, err = LoadConfig()
+	require.NoError(t, err, "Failed to load config")
+
+	repo = FindRepoByPath(config, repoPath)
+	assert.Equal(t, 0, len(repo.Towers), "Expected 0 towers after removing the last tower")
+}

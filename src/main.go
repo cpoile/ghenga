@@ -167,7 +167,7 @@ type BranchCmd struct {
 
 type AddCmd struct {
 	Name  string `arg:"" help:"Name of the branch to add" predictor:"predictBranches"`
-	Tower string `help:"Name of the tower to add the branch to" default:"default"`
+	Tower string `help:"Name of the tower to add the branch to (optional, defaults to current tower)"`
 }
 
 func (a *AddCmd) Run(ctx *kong.Context) error {
@@ -186,9 +186,12 @@ func (a *AddCmd) Run(ctx *kong.Context) error {
 	// Find or create repo entry in config
 	repo := FindOrCreateRepo(config, repoPath)
 
-	// If Tower is unspecified and we have a current tower, use that instead of the default
-	if a.Tower == "default" && repo.Current != "" {
+	// If Tower is empty and we have a current tower, use the current tower
+	if a.Tower == "" && repo.Current != "" {
 		a.Tower = repo.Current
+	}
+	if a.Tower == "" {
+		return fmt.Errorf("no tower specified, use 'ghenga current <tower-name>' to set one")
 	}
 
 	// Find or create tower entry in repo
@@ -504,6 +507,95 @@ func (b *BaseCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
+type RmTowerCmd struct {
+	Name string `arg:"" help:"Name of the tower to remove" predictor:"predictTowers"`
+}
+
+func (r *RmTowerCmd) Run(ctx *kong.Context) error {
+	// Get the repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return fmt.Errorf("failed to get current repository: %w", err)
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Find repo entry in config
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
+	}
+
+	// Find the tower in the repository
+	towerIndex := -1
+	for i, tower := range repo.Towers {
+		if tower.Name == r.Name {
+			towerIndex = i
+			break
+		}
+	}
+
+	if towerIndex == -1 {
+		return fmt.Errorf("tower '%s' not found in repository", r.Name)
+	}
+
+	// Check if this is the current tower
+	isCurrent := repo.Current == r.Name
+
+	// Create a red color for the warning
+	warningColor := color.New(color.FgRed).Add(color.Bold)
+
+	// Display warning and prompt for confirmation
+	if isCurrent {
+		warningColor.Printf("WARNING: You are about to remove the current tower '%s'!\n", r.Name)
+	} else {
+		warningColor.Printf("WARNING: You are about to remove tower '%s'!\n", r.Name)
+	}
+
+	// Show branch count
+	branchCount := len(repo.Towers[towerIndex].Branches)
+	if branchCount > 0 {
+		warningColor.Printf("This tower contains %d branch(es). The branches will still exist, but the tower that tracks them will be removed.\n", branchCount)
+	}
+
+	// Prompt for confirmation
+	fmt.Print("Are you sure you want to continue? [y/N]: ")
+
+	// Read response
+	var response string
+	fmt.Scanln(&response)
+
+	// Check if user confirmed
+	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+		fmt.Println("Operation cancelled.")
+		return nil
+	}
+
+	// Remove the tower from the repository
+	repo.Towers = append(repo.Towers[:towerIndex], repo.Towers[towerIndex+1:]...)
+
+	// If we removed the current tower, unset current
+	if isCurrent {
+		repo.Current = ""
+	}
+
+	// Save configuration
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	fmt.Printf("Removed tower '%s' from repository at '%s'\n", r.Name, repoPath)
+	if isCurrent {
+		fmt.Println("Note: Removed the current tower. Use 'ghenga current <tower-name>' to set a new current tower.")
+	}
+
+	return nil
+}
+
 type CLI struct {
 	Globals
 
@@ -514,6 +606,7 @@ type CLI struct {
 	Current CurrentCmd `cmd:"current" help:"Set the current tower"`
 	Rename  RenameCmd  `cmd:"rename" help:"Rename the current tower"`
 	Base    BaseCmd    `cmd:"base" help:"Set the tower's base commit"`
+	Rm      RmTowerCmd `cmd:"rm" help:"Remove the specified tower"`
 }
 
 func main() {
