@@ -390,3 +390,147 @@ func TestRemoveCommand(t *testing.T) {
 		t.Errorf("Expected another-tower to have 0 branches after removal, got %d", len(anotherTower.Branches))
 	}
 }
+
+func TestBranchAddToCurrent(t *testing.T) {
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "ghenga-branch-add-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Set up a test git repository
+	repo, err := git.PlainInit(tempDir, false)
+	if err != nil {
+		t.Fatalf("Failed to initialize git repository: %v", err)
+	}
+
+	// Create a temporary file and commit it
+	filePath := filepath.Join(tempDir, "test.txt")
+	if err := os.WriteFile(filePath, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	// Get the worktree
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Failed to get worktree: %v", err)
+	}
+
+	// Add the file to git
+	if _, err := wt.Add("test.txt"); err != nil {
+		t.Fatalf("Failed to add file to git: %v", err)
+	}
+
+	// Create an initial commit
+	_, err = wt.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to commit: %v", err)
+	}
+
+	// Override the config path for testing
+	originalConfigPath := ConfigPath
+	configFilePath := filepath.Join(tempDir, "config.toml")
+	ConfigPath = func() (string, error) {
+		return configFilePath, nil
+	}
+	defer func() { ConfigPath = originalConfigPath }()
+
+	// Change to the temp directory
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current directory: %v", err)
+	}
+	defer os.Chdir(originalDir)
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("Failed to change to temp directory: %v", err)
+	}
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Initialize with default tower
+	initCmd := &InitCmd{
+		DefaultTower: "default-tower",
+	}
+	if err := initCmd.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to run Init command: %v", err)
+	}
+
+	// Create a second tower
+	newCmd := &NewCmd{
+		Name: "second-tower",
+	}
+	if err := newCmd.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to create second tower: %v", err)
+	}
+
+	// Set the second tower as current
+	currentCmd := &CurrentCmd{
+		Tower: "second-tower",
+	}
+	if err := currentCmd.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to set current tower: %v", err)
+	}
+
+	// Add a branch using AddCmd directly with default tower
+	// This tests that we respect explicitly specified towers even when not "default"
+	addCmdWithTower := &AddCmd{
+		Name:  "explicit-tower-branch",
+		Tower: "default-tower", // Explicitly specify the non-current tower
+	}
+	if err := addCmdWithTower.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to add branch to explicit tower: %v", err)
+	}
+
+	// Add a branch with unspecified tower (should go to current)
+	addCmdCurrentTower := &AddCmd{
+		Name: "current-tower-branch",
+		// Not setting Tower, so it should use current
+	}
+	if err := addCmdCurrentTower.Run(mockCtx); err != nil {
+		t.Fatalf("Failed to add branch to current tower: %v", err)
+	}
+
+	// Verify the configuration
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	if len(config.Repos) != 1 {
+		t.Fatalf("Expected 1 repo, got %d", len(config.Repos))
+	}
+
+	repo1 := config.Repos[0]
+
+	// Get both towers
+	defaultTower := FindTowerByName(repo1, "default-tower")
+	if defaultTower == nil {
+		t.Fatalf("Could not find default-tower")
+	}
+
+	secondTower := FindTowerByName(repo1, "second-tower")
+	if secondTower == nil {
+		t.Fatalf("Could not find second-tower")
+	}
+
+	// Verify branch with explicit tower went to the default tower
+	if len(defaultTower.Branches) != 1 {
+		t.Errorf("Expected 1 branch in default-tower, got %d", len(defaultTower.Branches))
+	} else if defaultTower.Branches[0].Name != "explicit-tower-branch" {
+		t.Errorf("Expected branch name 'explicit-tower-branch', got '%s'", defaultTower.Branches[0].Name)
+	}
+
+	// Verify the branch with unspecified tower went to the current tower (second-tower)
+	if len(secondTower.Branches) != 1 {
+		t.Errorf("Expected 1 branch in second-tower, got %d", len(secondTower.Branches))
+	} else if secondTower.Branches[0].Name != "current-tower-branch" {
+		t.Errorf("Expected branch name 'current-tower-branch', got '%s'", secondTower.Branches[0].Name)
+	}
+}

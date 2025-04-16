@@ -186,6 +186,11 @@ func (a *AddCmd) Run(ctx *kong.Context) error {
 	// Find or create repo entry in config
 	repo := FindOrCreateRepo(config, repoPath)
 
+	// If Tower is unspecified and we have a current tower, use that instead of the default
+	if a.Tower == "default" && repo.Current != "" {
+		a.Tower = repo.Current
+	}
+
 	// Find or create tower entry in repo
 	tower := FindOrCreateTower(repo, a.Tower)
 
