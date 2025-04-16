@@ -11,7 +11,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	kongcompletion "github.com/jotaen/kong-completion"
-	"github.com/posener/complete"
 )
 
 var Version = "0.1.0"
@@ -141,7 +140,7 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 }
 
 type AddCmd struct {
-	Name  string `arg:"" help:"Name of the branch to add"`
+	Name  string `arg:"" help:"Name of the branch to add" predictor:"predictBranches"`
 	Tower string `help:"Name of the tower to add the branch to" default:"default"`
 }
 
@@ -302,7 +301,7 @@ func main() {
 
 	// Register completions. This must happen before the parsing step, so that
 	// tab completion invocations can be intercepted.
-	kongcompletion.Register(parser, predictTowers)
+	kongcompletion.Register(parser, predictTowers, predictBranches)
 
 	// Proceed as usual with parsing arguments and running the app.
 	ctx, err := parser.Parse(os.Args[1:])
@@ -310,27 +309,4 @@ func main() {
 
 	err = ctx.Run(&cli.Globals)
 	ctx.FatalIfErrorf(err)
-}
-
-var predictTowers = kongcompletion.WithPredictor(
-	"predictTowers",
-	TowerLister{},
-)
-
-type TowerLister struct{}
-
-func (l TowerLister) Predict(args complete.Args) []string {
-	config, err := LoadConfig()
-	if err != nil {
-		return nil
-	}
-
-	towers := make([]string, 0)
-	for _, repo := range config.Repos {
-		for _, tower := range repo.Towers {
-			towers = append(towers, tower.Name)
-		}
-	}
-
-	return towers
 }
