@@ -220,12 +220,52 @@ func (i *InitCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
+type NewCmd struct {
+	Name string `arg:"" help:"Name of the tower to create"`
+}
+
+func (n *NewCmd) Run(ctx *kong.Context) error {
+	// Get the repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return fmt.Errorf("failed to get current repository: %w", err)
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Find or create repo entry in config
+	repo := FindOrCreateRepo(config, repoPath)
+
+	// Check if tower already exists
+	for _, tower := range repo.Towers {
+		if tower.Name == n.Name {
+			return fmt.Errorf("tower '%s' already exists in repository at '%s'", n.Name, repoPath)
+		}
+	}
+
+	// Create tower
+	tower := FindOrCreateTower(repo, n.Name)
+
+	// Save configuration
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	fmt.Printf("Created tower '%s' in repository at '%s'\n", tower.Name, repoPath)
+	return nil
+}
+
 type CLI struct {
 	Globals
 
-	List ListCmd `cmd:"" aliases:"ls" help:"List all towers in current repository"`
+	List ListCmd `cmd:"" help:"List all towers in current repository"`
 	Add  AddCmd  `cmd:"add" help:"Add a branch to a tower in current repository"`
 	Init InitCmd `cmd:"init" help:"Initialize the current repository in ghenga config"`
+	New  NewCmd  `cmd:"new" help:"Create a new tower in current repository"`
 }
 
 func main() {
