@@ -44,6 +44,52 @@ var predictBranches = kongcompletion.WithPredictor(
 	BranchLister{},
 )
 
+var predictTowerBranches = kongcompletion.WithPredictor(
+	"predictTowerBranches",
+	TowerBranchLister{},
+)
+
+type TowerBranchLister struct{}
+
+func (l TowerBranchLister) Predict(args complete.Args) []string {
+	// Get current repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return nil
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return nil
+	}
+
+	// Find repo in config
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return nil
+	}
+
+	// Get current tower
+	var currentTower *Tower
+	if repo.Current != "" {
+		currentTower = FindTowerByName(repo, repo.Current)
+	}
+
+	// If no current tower, return empty list
+	if currentTower == nil {
+		return nil
+	}
+
+	// Get all branch names from the current tower
+	branches := make([]string, 0, len(currentTower.Branches))
+	for _, branch := range currentTower.Branches {
+		branches = append(branches, branch.Name)
+	}
+
+	return branches
+}
+
 type BranchLister struct{}
 
 func (l BranchLister) Predict(args complete.Args) []string {

@@ -215,7 +215,7 @@ func (a *AddCmd) Run(ctx *kong.Context) error {
 }
 
 type RmCmd struct {
-	Name string `arg:"" help:"Name of the branch to remove" predictor:"predictBranches"`
+	Name string `arg:"" help:"Name of the branch to remove" predictor:"predictTowerBranches"`
 }
 
 func (r *RmCmd) Run(ctx *kong.Context) error {
@@ -635,7 +635,7 @@ func main() {
 
 	// Register completions. This must happen before the parsing step, so that
 	// tab completion invocations can be intercepted.
-	kongcompletion.Register(parser, predictTowers, predictBranches, predictGitRefs)
+	kongcompletion.Register(parser, predictTowers, predictBranches, predictGitRefs, predictTowerBranches)
 
 	// Proceed as usual with parsing arguments and running the app.
 	ctx, err := parser.Parse(os.Args[1:])
