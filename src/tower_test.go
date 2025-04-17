@@ -761,8 +761,6 @@ func TestListCmd_StaggeredCommitView(t *testing.T) {
 	// 1. Should contain all three branches in the correct order
 	assert.Contains(t, output, "Tower: stacked-tower")
 
-	fmt.Println(output)
-
 	// Find positions of each branch in the output to verify order
 	featureTopPos := strings.Index(output, "feature-top (current)\n")
 	assert.True(t, featureTopPos != -1, "feature-top should be in the output")
@@ -1272,4 +1270,661 @@ func TestRmTowerCommand(t *testing.T) {
 
 	repo = FindRepoByPath(config, repoPath)
 	assert.Equal(t, 0, len(repo.Towers), "Expected 0 towers after removing the last tower")
+}
+
+func TestListCmd_MiddleBranchDivergence(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Get the initial main branch reference
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	mainHash := headRef.Hash()
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	// Step 1: Create the base branch with 3 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("base-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 3 commits to base branch
+	for i := 0; i < 3; i++ {
+		filename := fmt.Sprintf("file-base-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Get base branch reference
+	baseRef, err := repo.Reference(plumbing.NewBranchReferenceName("base-branch"), true)
+	require.NoError(t, err)
+
+	// Step 2: Create branch-2 (middle-branch) off base branch's HEAD, with 2 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   baseRef.Hash(),
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("middle-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 2 commits to middle branch
+	for i := 0; i < 2; i++ {
+		filename := fmt.Sprintf("file-middle-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Get middle branch reference (before adding more commits)
+	middleRef, err := repo.Reference(plumbing.NewBranchReferenceName("middle-branch"), true)
+	require.NoError(t, err)
+
+	// Step 3: Create branch-3 (top-branch) off branch-2's HEAD, with 3 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   middleRef.Hash(),
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("top-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 3 commits to top branch
+	for i := 0; i < 3; i++ {
+		filename := fmt.Sprintf("file-top-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Step 4: Checkout branch-2, and create one more commit off branch-2's head
+	err = wt.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName("middle-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add divergent commit to middle branch
+	filePath := filepath.Join(repoPath, "divergent-middle.txt")
+	err = os.WriteFile(filePath, []byte("divergent content"), 0644)
+	require.NoError(t, err)
+	_, err = wt.Add("divergent-middle.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Divergent commit on middle branch", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with one tower and all branches in order
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path:    repoPath,
+				Current: "test-tower",
+				Towers: []*Tower{
+					{
+						Name: "test-tower",
+						Base: mainHash.String(),
+						Branches: []Branch{
+							{Name: "base-branch"},
+							{Name: "middle-branch"},
+							{Name: "top-branch"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Run the list command
+	cmd := &ListCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(mockCtx)
+	})
+	require.NoError(t, err)
+
+	// Verify output
+	assert.Contains(t, output, "Tower: test-tower")
+
+	// Check for divergence warning
+	assert.Contains(t, output, "⚠️ This branch has diverged", "Output should contain divergence warning")
+
+	// Verify the top branch shows divergence from middle branch
+	topPos := strings.Index(output, "top-branch\n")
+	assert.True(t, topPos != -1, "Top branch should be in the output")
+	middlePos := strings.Index(output, "middle-branch (current)\n")
+	assert.True(t, middlePos != -1, "Middle branch should be in the output")
+	divergencePos := strings.Index(output, "⚠️ This branch has diverged")
+	assert.True(t, divergencePos != -1, "Divergence warning should be in the output")
+
+	assert.True(t, topPos < divergencePos, "Divergence warning should appear in top branch section")
+	assert.True(t, divergencePos < middlePos, "Divergence warning should appear before middle branch section")
+
+	// Verify the divergent commit message is in the output
+	assert.Contains(t, output, "Divergent commit on middle branch", "Divergent commit should be shown")
+}
+
+func TestListCmd_TopBranchDivergence(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Get the initial main branch reference
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	mainHash := headRef.Hash()
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	// Step 1: Create the base branch with 3 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("base-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 3 commits to base branch
+	for i := 0; i < 3; i++ {
+		filename := fmt.Sprintf("file-base-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Get base branch reference
+	baseRef, err := repo.Reference(plumbing.NewBranchReferenceName("base-branch"), true)
+	require.NoError(t, err)
+
+	// Step 2: Create branch-2 (middle-branch) off base branch's HEAD, with 2 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   baseRef.Hash(),
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("middle-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 2 commits to middle branch
+	for i := 0; i < 2; i++ {
+		filename := fmt.Sprintf("file-middle-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Get middle branch reference (before adding more commits)
+	middleRef, err := repo.Reference(plumbing.NewBranchReferenceName("middle-branch"), true)
+	require.NoError(t, err)
+
+	// Step 3: Create branch-3 (top-branch) off branch-2's HEAD, with 2 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   middleRef.Hash(),
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("top-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 2 commits to top branch
+	for i := 0; i < 2; i++ {
+		filename := fmt.Sprintf("file-top-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Step 4: Go back to top branch and add another commit (creates divergence)
+	err = wt.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName("top-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add divergent commit to top branch
+	filePath := filepath.Join(repoPath, "divergent-top.txt")
+	err = os.WriteFile(filePath, []byte("divergent content"), 0644)
+	require.NoError(t, err)
+	_, err = wt.Add("divergent-top.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Divergent commit on top branch", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err)
+
+	// Step 5: Go back to middle branch and add another commit
+	err = wt.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName("middle-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add another commit to middle branch
+	filePath = filepath.Join(repoPath, "another-middle.txt")
+	err = os.WriteFile(filePath, []byte("another middle content"), 0644)
+	require.NoError(t, err)
+	_, err = wt.Add("another-middle.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Another commit on middle branch", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with one tower and all branches in order
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path:    repoPath,
+				Current: "test-tower",
+				Towers: []*Tower{
+					{
+						Name: "test-tower",
+						Base: mainHash.String(),
+						Branches: []Branch{
+							{Name: "base-branch"},
+							{Name: "middle-branch"},
+							{Name: "top-branch"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Run the list command
+	cmd := &ListCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(mockCtx)
+	})
+	require.NoError(t, err)
+
+	// Verify output
+	assert.Contains(t, output, "Tower: test-tower")
+
+	// Check for divergence warning
+	assert.Contains(t, output, "⚠️ This branch has diverged", "Output should contain divergence warning")
+
+	// Verify the top branch shows divergence
+	topPos := strings.Index(output, "top-branch\n")
+	assert.True(t, topPos != -1, "Top branch should be in the output")
+	middlePos := strings.Index(output, "middle-branch (current)\n")
+	assert.True(t, middlePos != -1, "Middle branch should be in the output")
+	divergencePos := strings.Index(output, "⚠️ This branch has diverged")
+	assert.True(t, divergencePos != -1, "Divergence warning should be in the output")
+
+	assert.True(t, topPos < divergencePos, "Divergence warning should appear in top branch section")
+	assert.True(t, divergencePos < middlePos, "Divergence warning should appear before middle branch section")
+
+	// Verify the divergent commit messages are in the output
+	assert.Contains(t, output, "Divergent commit on top branch", "Top branch divergent commit should be shown")
+	assert.Contains(t, output, "Another commit on middle branch", "Middle branch additional commit should be shown")
+}
+
+func TestListCmd_MultipleDivergences(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Get the initial main branch reference
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	mainHash := headRef.Hash()
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	// Step 1: Create the base branch with 3 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("base-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 3 commits to base branch
+	for i := 0; i < 3; i++ {
+		filename := fmt.Sprintf("file-base-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Get base branch reference
+	baseRef, err := repo.Reference(plumbing.NewBranchReferenceName("base-branch"), true)
+	require.NoError(t, err)
+
+	// Step 2: Create branch-2 (middle-branch) off base branch's HEAD, with 2 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   baseRef.Hash(),
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("middle-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 2 commits to middle branch
+	for i := 0; i < 2; i++ {
+		filename := fmt.Sprintf("file-middle-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Get middle branch reference (before adding more commits)
+	middleRef, err := repo.Reference(plumbing.NewBranchReferenceName("middle-branch"), true)
+	require.NoError(t, err)
+
+	// Step 3: Create branch-3 (third-branch) off branch-2's HEAD, with 2 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   middleRef.Hash(),
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("third-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 2 commits to third branch
+	for i := 0; i < 2; i++ {
+		filename := fmt.Sprintf("file-third-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Get third branch reference before creating top branch
+	thirdRef, err := repo.Reference(plumbing.NewBranchReferenceName("third-branch"), true)
+	require.NoError(t, err)
+
+	// Step 4: Create branch-4 (top-branch) off branch-3's HEAD, with 2 commits
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   thirdRef.Hash(),
+		Create: true,
+		Branch: plumbing.NewBranchReferenceName("top-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add 2 commits to top branch
+	for i := 0; i < 2; i++ {
+		filename := fmt.Sprintf("file-top-branch-%d.txt", i)
+		filePath := filepath.Join(repoPath, filename)
+		err = os.WriteFile(filePath, []byte(fmt.Sprintf("content %d", i)), 0644)
+		require.NoError(t, err)
+		_, err = wt.Add(filename)
+		require.NoError(t, err)
+		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Test User",
+				Email: "test@example.com",
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// Step 5: Go back to middle-branch and add one more commit (creates first divergence)
+	err = wt.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName("middle-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add divergent commit to middle branch
+	filePath := filepath.Join(repoPath, "divergent-middle.txt")
+	err = os.WriteFile(filePath, []byte("divergent middle content"), 0644)
+	require.NoError(t, err)
+	_, err = wt.Add("divergent-middle.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Divergent commit on middle branch", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err)
+
+	// Step 6: Go back to top-branch and add another commit (creates second divergence)
+	err = wt.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName("top-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add divergent commit to top branch
+	filePath = filepath.Join(repoPath, "divergent-top.txt")
+	err = os.WriteFile(filePath, []byte("divergent top content"), 0644)
+	require.NoError(t, err)
+	_, err = wt.Add("divergent-top.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Divergent commit on top branch", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err)
+
+	// Step 7: Go back to third-branch and add another commit (completes second divergence)
+	err = wt.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName("third-branch"),
+	})
+	require.NoError(t, err)
+
+	// Add another commit to third branch
+	filePath = filepath.Join(repoPath, "another-third.txt")
+	err = os.WriteFile(filePath, []byte("another third content"), 0644)
+	require.NoError(t, err)
+	_, err = wt.Add("another-third.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Another commit on third branch", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with one tower and all branches in order
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path:    repoPath,
+				Current: "test-tower",
+				Towers: []*Tower{
+					{
+						Name: "test-tower",
+						Base: mainHash.String(),
+						Branches: []Branch{
+							{Name: "base-branch"},
+							{Name: "middle-branch"},
+							{Name: "third-branch"},
+							{Name: "top-branch"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Run the list command
+	cmd := &ListCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(mockCtx)
+	})
+	require.NoError(t, err)
+
+	// Verify output
+	assert.Contains(t, output, "Tower: test-tower")
+
+	// There should be two divergence warnings
+	divergencesCount := strings.Count(output, "⚠️ This branch has diverged")
+	assert.Equal(t, 2, divergencesCount, "Output should contain two divergence warnings")
+
+	// Verify both divergent commits are highlighted
+	assert.Contains(t, output, "Divergent commit on middle branch", "Middle branch divergent commit should be shown")
+	assert.Contains(t, output, "Divergent commit on top branch", "Top branch divergent commit should be shown")
+
+	// Verify branch order and placement of warnings
+	topPos := strings.Index(output, "top-branch\n")
+	assert.True(t, topPos != -1, "Top branch should be in the output")
+	thirdPos := strings.Index(output, "third-branch (current)\n")
+	assert.True(t, thirdPos != -1, "Third branch should be in the output")
+	middlePos := strings.Index(output, "middle-branch\n")
+	assert.True(t, middlePos != -1, "Middle branch should be in the output")
+	basePos := strings.Index(output, "base-branch\n")
+	assert.True(t, basePos != -1, "Base branch should be in the output")
+
+	// Find positions of divergence warnings
+	firstWarningPos := strings.Index(output, "⚠️ This branch has diverged")
+	secondWarningPos := strings.Index(output[firstWarningPos+1:], "⚠️ This branch has diverged") + firstWarningPos + 1
+
+	// Verify warnings appear in the right sections
+	assert.True(t, topPos < firstWarningPos && firstWarningPos < thirdPos,
+		"First divergence warning should be in top branch section")
+	assert.True(t, thirdPos < secondWarningPos && secondWarningPos < middlePos,
+		"Second divergence warning should be in middle branch section")
 }

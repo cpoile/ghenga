@@ -34,7 +34,7 @@ type ListCmd struct {
 	TowerName string `arg:"" optional:"" help:"Name of the tower to list. If not provided, all towers will be listed." predictor:"predictTowers"`
 }
 
-func (l *ListCmd) Run(ctx *kong.Context) error {
+func (l *ListCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -73,6 +73,7 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 	branchColor := color.New(color.FgYellow)
 	commitColor := color.New(color.FgWhite)
 	baseCommitColor := color.New(color.FgCyan)
+	divergedColor := color.New(color.FgRed).Add(color.Bold)
 
 	// Filter towers based on TowerName
 	var towers []*Tower
@@ -105,6 +106,9 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 		// Store branch hashes for limiting commit display
 		branchHashes := make(map[int]plumbing.Hash)
 
+		// Track divergence points for highlighting
+		divergencePoints := make(map[string]bool)
+
 		// First pass: collect branch hashes
 		for i, branch := range tower.Branches {
 			branchRefName := plumbing.NewBranchReferenceName(branch.Name)
@@ -136,12 +140,26 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 			// Determine if we need to find the stop commit (branch below)
 			var stopAtCommit plumbing.Hash
 			var foundStopCommit bool
+			var hasDiverged bool
+			var divergencePoint plumbing.Hash
 
 			// If this is not the first branch (base branch), use the branch below as stop point
 			if i > 0 {
 				if lowerHash, exists := branchHashes[i-1]; exists {
 					stopAtCommit = lowerHash
 					foundStopCommit = true
+
+					// Find the merge base (common ancestor) between this branch and the one below
+					mergeBase, err := findMergeBase(r, branchRef.Hash(), lowerHash)
+					if err == nil {
+						// If the merge base is not the head of the lower branch, they've diverged
+						hasDiverged = mergeBase != lowerHash
+						if hasDiverged {
+							divergencePoint = mergeBase
+							// Store the divergence point for highlighting in all branches
+							divergencePoints[divergencePoint.String()] = true
+						}
+					}
 				}
 			}
 
@@ -177,11 +195,20 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 			// Display commits
 			for j := 0; j < len(commits); j++ {
 				commit := commits[j]
+
+				// Show divergence warning just above the common ancestor
+				if hasDiverged && commit.Hash == divergencePoint {
+					divergedColor.Printf("    ⚠️ This branch has diverged ↓↓ here ↓↓ from the branch below\n")
+				}
+
 				message := strings.Split(commit.Message, "\n")[0]
 
-				// Check if this is the base commit
+				// Check if this is the base commit or a divergence point
 				if i == 0 && tower.Base != "" && commit.Hash.String() == tower.Base {
 					baseCommitColor.Printf("    %s %s (base)\n", commit.Hash.String()[:7], message)
+				} else if divergencePoints[commit.Hash.String()] {
+					// Highlight divergence points in all branches
+					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
 				} else {
 					commitColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
 				}
@@ -191,6 +218,37 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 	}
 
 	return nil
+}
+
+// findMergeBase finds the merge base (common ancestor) between two commits
+func findMergeBase(r *git.Repository, commit1, commit2 plumbing.Hash) (plumbing.Hash, error) {
+	// If commits are the same, return immediately
+	if commit1 == commit2 {
+		return commit1, nil
+	}
+
+	// Get commit objects
+	c1, err := r.CommitObject(commit1)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+
+	c2, err := r.CommitObject(commit2)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+
+	// Find merge base using go-git's MergeBase function
+	mergeBase, err := c1.MergeBase(c2)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+
+	if len(mergeBase) == 0 {
+		return plumbing.ZeroHash, fmt.Errorf("no common ancestor found")
+	}
+
+	return mergeBase[0].Hash, nil
 }
 
 type BranchCmd struct {
@@ -203,7 +261,7 @@ type AddCmd struct {
 	Tower string `help:"Name of the tower to add the branch to (optional, defaults to current tower)"`
 }
 
-func (a *AddCmd) Run(ctx *kong.Context) error {
+func (a *AddCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -251,7 +309,7 @@ type RmCmd struct {
 	Name string `arg:"" help:"Name of the branch to remove" predictor:"predictTowerBranches"`
 }
 
-func (r *RmCmd) Run(ctx *kong.Context) error {
+func (r *RmCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -310,7 +368,7 @@ type InitCmd struct {
 	DefaultTower string `help:"Name of the default tower to create" default:"default"`
 }
 
-func (i *InitCmd) Run(ctx *kong.Context) error {
+func (i *InitCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -349,7 +407,7 @@ type NewCmd struct {
 	Name string `arg:"" help:"Name of the tower to create"`
 }
 
-func (n *NewCmd) Run(ctx *kong.Context) error {
+func (n *NewCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -388,7 +446,7 @@ type CurrentCmd struct {
 	Tower string `arg:"" help:"Name of the tower to set as current" predictor:"predictTowers"`
 }
 
-func (c *CurrentCmd) Run(ctx *kong.Context) error {
+func (c *CurrentCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -425,7 +483,7 @@ type RenameCmd struct {
 	NewName string `arg:"" help:"New name for the current tower"`
 }
 
-func (r *RenameCmd) Run(ctx *kong.Context) error {
+func (r *RenameCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -484,7 +542,7 @@ type BaseCmd struct {
 	Commit string `arg:"" help:"Commit hash or reference to set as the tower's base" predictor:"predictGitRefs"`
 }
 
-func (b *BaseCmd) Run(ctx *kong.Context) error {
+func (b *BaseCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -544,7 +602,7 @@ type RmTowerCmd struct {
 	Name string `arg:"" help:"Name of the tower to remove" predictor:"predictTowers"`
 }
 
-func (r *RmTowerCmd) Run(ctx *kong.Context) error {
+func (r *RmTowerCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
