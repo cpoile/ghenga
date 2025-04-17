@@ -102,6 +102,18 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 
 		fmt.Println()
 
+		// Store branch hashes for limiting commit display
+		branchHashes := make(map[int]plumbing.Hash)
+
+		// First pass: collect branch hashes
+		for i, branch := range tower.Branches {
+			branchRefName := plumbing.NewBranchReferenceName(branch.Name)
+			branchRef, err := r.Reference(branchRefName, true)
+			if err == nil {
+				branchHashes[i] = branchRef.Hash()
+			}
+		}
+
 		// Iterate through branches in reverse order
 		for i := len(tower.Branches) - 1; i >= 0; i-- {
 			branch := tower.Branches[i]
@@ -121,16 +133,39 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 				continue
 			}
 
+			// Determine if we need to find the stop commit (branch below)
+			var stopAtCommit plumbing.Hash
+			var foundStopCommit bool
+
+			// If this is not the first branch (base branch), use the branch below as stop point
+			if i > 0 {
+				if lowerHash, exists := branchHashes[i-1]; exists {
+					stopAtCommit = lowerHash
+					foundStopCommit = true
+				}
+			}
+
 			// Get commit history
 			commitIter, err := r.Log(&git.LogOptions{From: branchRef.Hash()})
 			if err != nil {
 				continue
 			}
 
-			// Collect commits (limit to 10 for now)
+			// Collect commits
 			var commits []*object.Commit
 			count := 0
 			commitIter.ForEach(func(c *object.Commit) error {
+				// For the base branch (i==0), stop at the tower base commit
+				if i == 0 && tower.Base != "" && c.Hash.String() == tower.Base {
+					commits = append(commits, c) // Include the base commit
+					return fmt.Errorf("stop")
+				}
+
+				// For non-base branches, stop at the lower branch's commit
+				if foundStopCommit && c.Hash == stopAtCommit {
+					return fmt.Errorf("stop")
+				}
+
 				if count < 10 {
 					commits = append(commits, c)
 					count++
@@ -139,16 +174,14 @@ func (l *ListCmd) Run(ctx *kong.Context) error {
 				return fmt.Errorf("stop")
 			})
 
-			// Display commits in reverse order
+			// Display commits
 			for j := 0; j < len(commits); j++ {
 				commit := commits[j]
 				message := strings.Split(commit.Message, "\n")[0]
 
 				// Check if this is the base commit
-				if tower.Base != "" && commit.Hash.String() == tower.Base {
+				if i == 0 && tower.Base != "" && commit.Hash.String() == tower.Base {
 					baseCommitColor.Printf("    %s %s (base)\n", commit.Hash.String()[:7], message)
-					// Stop displaying commits after the base
-					break
 				} else {
 					commitColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
 				}

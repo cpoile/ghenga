@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -675,6 +676,158 @@ func TestListCmd_FilterByTowerName(t *testing.T) {
 	assert.NotContains(t, output, "bugfix-1")
 	assert.Contains(t, output, "Add file-feature-1-0.txt")
 	assert.Contains(t, output, "Add file-feature-1-1.txt")
+}
+
+func TestListCmd_StaggeredCommitView(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Create a stack of branches with specific commits
+	// main -> feature-base -> feature-middle -> feature-top
+
+	// Get the initial main branch reference (created by setupTestRepo)
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	mainHash := headRef.Hash()
+
+	// Create feature-base branch with 2 commits
+	createTestBranch(t, repo, "feature-base", 2)
+
+	// Get the feature-base reference
+	_, err = repo.Reference(plumbing.NewBranchReferenceName("feature-base"), true)
+	require.NoError(t, err)
+
+	// Create feature-middle branch with 3 commits
+	createTestBranch(t, repo, "feature-middle", 3)
+
+	// Get the feature-middle reference
+	_, err = repo.Reference(plumbing.NewBranchReferenceName("feature-middle"), true)
+	require.NoError(t, err)
+
+	// Create feature-top branch with 2 commits
+	createTestBranch(t, repo, "feature-top", 2)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with one tower and a stack of branches in order
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path:    repoPath,
+				Current: "stacked-tower",
+				Towers: []*Tower{
+					{
+						Name: "stacked-tower",
+						Base: mainHash.String(), // Set the main commit as the base
+						Branches: []Branch{
+							{Name: "feature-base"},
+							{Name: "feature-middle"},
+							{Name: "feature-top"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Create a mock context for running commands
+	mockCtx := &kong.Context{}
+
+	// Run the list command
+	cmd := &ListCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(mockCtx)
+	})
+	require.NoError(t, err)
+
+	// Verify output
+	// 1. Should contain all three branches in the correct order
+	assert.Contains(t, output, "Tower: stacked-tower")
+
+	fmt.Println(output)
+
+	// Find positions of each branch in the output to verify order
+	featureTopPos := strings.Index(output, "feature-top (current)\n")
+	assert.True(t, featureTopPos != -1, "feature-top should be in the output")
+	featureMiddlePos := strings.Index(output, "feature-middle\n")
+	assert.True(t, featureMiddlePos != -1, "feature-middle should be in the output")
+	featureBasePos := strings.Index(output, "feature-base\n")
+	assert.True(t, featureBasePos != -1, "feature-base should be in the output")
+
+	// Verify branches are in the correct order (top-to-bottom)
+	assert.True(t, featureTopPos < featureMiddlePos, "feature-top should be listed before feature-middle")
+	assert.True(t, featureMiddlePos < featureBasePos, "feature-middle should be listed before feature-base")
+
+	// 2. The base branch (feature-base) should show commits up to the base commit
+	// It has 2 commits of its own + the base commit marker
+	assert.Contains(t, output, "file-feature-base-0.txt")
+	assert.Contains(t, output, "file-feature-base-1.txt")
+	assert.Contains(t, output, "(base)")
+
+	// 3. The middle branch should only show its unique commits (not feature-base commits)
+	assert.Contains(t, output, "file-feature-middle-0.txt")
+	assert.Contains(t, output, "file-feature-middle-1.txt")
+	assert.Contains(t, output, "file-feature-middle-2.txt")
+
+	// 4. The top branch should only show its unique commits (not feature-middle or feature-base commits)
+	assert.Contains(t, output, "file-feature-top-0.txt")
+	assert.Contains(t, output, "file-feature-top-1.txt")
+
+	// 5. Verify separation - feature-base section should not contain feature-middle or feature-top commits
+	baseSection := output[featureBasePos:]
+	assert.NotContains(t, baseSection, "file-feature-middle", "Base branch section should not contain middle branch commits")
+	assert.NotContains(t, baseSection, "file-feature-top", "Base branch section should not contain top branch commits")
+
+	// 6. Verify separation - feature-middle section should not contain feature-top or feature-base commits
+	middleSection := output[featureMiddlePos:featureBasePos]
+	assert.NotContains(t, middleSection, "file-feature-top", "Middle branch section should not contain top branch commits")
+	assert.NotContains(t, middleSection, "file-feature-base", "Middle branch section should not contain base branch commits")
+
+	// 7. Verify separation - feature-top section should not contain feature-middle or feature-base commits
+	topSection := output[featureTopPos:featureMiddlePos]
+	assert.NotContains(t, topSection, "file-feature-middle", "Top branch section should not contain middle branch commits")
+	assert.NotContains(t, topSection, "file-feature-base", "Top branch section should not contain base branch commits")
+
+	// Run the list command with specific tower name
+	cmdWithName := &ListCmd{TowerName: "stacked-tower"}
+	outputWithName, err := CaptureOutput(func() error {
+		return cmdWithName.Run(mockCtx)
+	})
+	require.NoError(t, err)
+
+	// Verify filtering by name produces the same output
+	assert.Equal(t, output, outputWithName, "Filtering by tower name should produce the same output")
+
+	// Test case for when the tower has no base commit set
+	config.Repos[0].Towers[0].Base = ""
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	outputNoBase, err := CaptureOutput(func() error {
+		return cmd.Run(mockCtx)
+	})
+	require.NoError(t, err)
+
+	// Verify output without base
+	assert.Contains(t, outputNoBase, "Tower: stacked-tower")
+	assert.NotContains(t, outputNoBase, "(base)", "Output should not contain base marker when no base is set")
 }
 
 func TestRenameCommand(t *testing.T) {
