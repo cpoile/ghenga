@@ -22,14 +22,16 @@ type Repo struct {
 
 // Tower represents a stack of branches
 type Tower struct {
-	Name     string   `toml:"name"`
-	Base     string   `toml:"base"`
-	Branches []Branch `toml:"branches"`
+	Name        string   `toml:"name"`
+	Base        string   `toml:"base"`
+	Branches    []Branch `toml:"branches"`
+	LastRebased string   `toml:"last_rebased,omitempty"` // Timestamp of the last rebase operation
 }
 
 // Branch represents a git branch
 type Branch struct {
-	Name string `toml:"name"`
+	Name         string `toml:"name"`
+	LastReflogID string `toml:"last_reflog_id,omitempty"` // Stores the commit hash before last rebase for undo operations
 }
 
 // ConfigPathFunc is a function type that returns the path to the config file

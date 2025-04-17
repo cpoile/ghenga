@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
@@ -687,6 +689,428 @@ func (r *RmTowerCmd) Run(_ *kong.Context) error {
 	return nil
 }
 
+type RebaseCmd struct {
+	Do   RebaseDoCmd   `cmd:"" help:"Rebase all branches in the current tower that have diverged from their base"`
+	Undo RebaseUndoCmd `cmd:"undo" help:"Undo the last rebase operation for the current tower"`
+}
+
+type RebaseDoCmd struct {
+}
+
+func (r *RebaseDoCmd) Run(_ *kong.Context) error {
+	// Check if working directory is clean. If not, return error.
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	output, err := statusCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to check git status: %w", err)
+	}
+
+	fmt.Println("status output:")
+	fmt.Println(string(output))
+
+	if len(strings.TrimSpace(string(output))) > 0 {
+		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before rebasing")
+	}
+
+	// Get the repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return fmt.Errorf("failed to get current repository: %w", err)
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Find repo entry in config
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
+	}
+
+	// Check if a current tower is set
+	if repo.Current == "" {
+		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
+	}
+
+	// Get current tower
+	currentTower := FindTowerByName(repo, repo.Current)
+	if currentTower == nil {
+		return fmt.Errorf("current tower '%s' not found", repo.Current)
+	}
+
+	// Open the repository
+	gitRepo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
+		DetectDotGit: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	// Store current timestamp for the rebase operation
+	currentTime := time.Now().Format(time.RFC3339)
+	currentTower.LastRebased = currentTime
+
+	// Store the current commit hash for each branch before rebasing
+	for i := range currentTower.Branches {
+		branch := &currentTower.Branches[i]
+		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
+		branchRef, err := gitRepo.Reference(branchRefName, true)
+		if err != nil {
+			// If branch doesn't exist in git, skip storing its hash
+			continue
+		}
+		branch.LastReflogID = branchRef.Hash().String()
+	}
+
+	// Save the configuration with the updated reflog hashes
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to save configuration with branch states: %w", err)
+	}
+
+	// Store information about diverged branches and their unique commits
+	type BranchInfo struct {
+		Index          int
+		Name           string
+		BaseBranchName string
+		UniqueCommits  []string // List of unique commit hashes in reverse order (oldest first)
+		IsDiverged     bool
+	}
+
+	var branchInfos []BranchInfo
+
+	// Get the current branch to restore it at the end
+	head, err := gitRepo.Head()
+	if err != nil {
+		return fmt.Errorf("failed to get current branch: %w", err)
+	}
+	originalBranch := head.Name().Short()
+
+	// First pass: collect all branches, their unique commits, and determine which have diverged
+	for i := 1; i < len(currentTower.Branches); i++ {
+		branch := currentTower.Branches[i]
+		baseBranch := currentTower.Branches[i-1]
+
+		// Get branch references
+		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
+		branchHead, err := gitRepo.Reference(branchRefName, true)
+		if err != nil {
+			// Skip if branch doesn't exist in git
+			continue
+		}
+
+		baseRefName := plumbing.NewBranchReferenceName(baseBranch.Name)
+		baseHead, err := gitRepo.Reference(baseRefName, true)
+		if err != nil {
+			// Skip if base branch doesn't exist in git
+			continue
+		}
+
+		// Find the merge base (common ancestor)
+		mergeBase, err := findMergeBase(gitRepo, branchHead.Hash(), baseHead.Hash())
+		if err != nil {
+			return fmt.Errorf("failed to find merge base between '%s' and '%s': %w", branch.Name, baseBranch.Name, err)
+		}
+
+		// Create a DivergedBranch entry
+		db := BranchInfo{
+			Index:          i,
+			Name:           branch.Name,
+			BaseBranchName: baseBranch.Name,
+			UniqueCommits:  []string{},
+			IsDiverged:     mergeBase != baseHead.Hash(),
+		}
+
+		// Collect the unique commits
+		// Use git rev-list to find unique commits
+		cmd := exec.Command("git", "rev-list", "--reverse", baseHead.Hash().String()+".."+branchHead.Hash().String())
+		output, err := cmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to list unique commits for '%s': %w", branch.Name, err)
+		}
+
+		// Parse the commit hashes
+		commits := strings.Split(strings.TrimSpace(string(output)), "\n")
+		if len(commits) > 0 && commits[0] != "" {
+			db.UniqueCommits = commits
+		}
+
+		branchInfos = append(branchInfos, db)
+	}
+
+	// Keep every branch after (and including) the first diverged branch
+	var realDivergedBranches []BranchInfo
+	for i := range branchInfos {
+		if branchInfos[i].IsDiverged {
+			realDivergedBranches = branchInfos[i:]
+			break
+		}
+	}
+
+	// If no diverged branches found, exit early
+	if len(realDivergedBranches) == 0 {
+		fmt.Println("No diverged branches found in the current tower. All branches are up to date.")
+		return nil
+	}
+
+	// Create color formatters
+	branchColor := color.New(color.FgYellow)
+	warningColor := color.New(color.FgRed).Add(color.Bold)
+
+	// Print information about diverged branches and ask for confirmation
+	fmt.Printf("Found %d diverged branch(es) in tower '%s':\n", len(realDivergedBranches), currentTower.Name)
+	for _, db := range realDivergedBranches {
+		branchColor.Printf("  %s (based on %s) - %d unique commits\n",
+			db.Name, db.BaseBranchName, len(db.UniqueCommits))
+	}
+
+	// Show warning about rebase
+	warningColor.Println("\nWARNING: Rebasing will change commit hashes and you will need to force-push to remote branches if they exist.")
+	warningColor.Println("Make sure you understand the implications of rebasing published branches.")
+	fmt.Println("You may undo the rebase with 'ghenga rebase undo' if you make a mistake.")
+
+	// Prompt for confirmation
+	fmt.Print("\nDo you want to proceed with rebasing these branches? [y/N]: ")
+
+	// Read response
+	var response string
+	fmt.Scanln(&response)
+
+	// Check if user confirmed
+	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+		fmt.Println("Rebase operation cancelled.")
+		return nil
+	}
+
+	// Second pass: perform rebases
+	for _, db := range realDivergedBranches {
+		fmt.Printf("Rebasing '%s' onto '%s'...\n", db.Name, db.BaseBranchName)
+
+		// If there are no unique commits, skip
+		if len(db.UniqueCommits) == 0 {
+			fmt.Printf("No unique commits found for '%s', skipping\n", db.Name)
+			continue
+		}
+
+		// Checkout the base branch
+		checkoutBaseCmd := exec.Command("git", "checkout", db.BaseBranchName)
+		checkoutBaseCmd.Stdout = os.Stdout
+		checkoutBaseCmd.Stderr = os.Stderr
+		if err := checkoutBaseCmd.Run(); err != nil {
+			return fmt.Errorf("failed to checkout base branch '%s': %w", db.BaseBranchName, err)
+		}
+
+		// Create and checkout a temporary branch
+		tempBranch := fmt.Sprintf("temp-rebase-%s", db.Name)
+		createTempCmd := exec.Command("git", "checkout", "-b", tempBranch)
+		createTempCmd.Stdout = os.Stdout
+		createTempCmd.Stderr = os.Stderr
+		if err := createTempCmd.Run(); err != nil {
+			return fmt.Errorf("failed to create temporary branch: %w", err)
+		}
+
+		// Cherry-pick each unique commit onto the temporary branch
+		for _, commit := range db.UniqueCommits {
+			cherryPickCmd := exec.Command("git", "cherry-pick", commit)
+			cherryPickCmd.Stdout = os.Stdout
+			cherryPickCmd.Stderr = os.Stderr
+			if err := cherryPickCmd.Run(); err != nil {
+				// Clean up by deleting the temporary branch
+				deleteTempCmd := exec.Command("git", "checkout", originalBranch)
+				deleteTempCmd.Run()
+				deleteTempCmd = exec.Command("git", "branch", "-D", tempBranch)
+				deleteTempCmd.Run()
+
+				return fmt.Errorf("failed to cherry-pick commit '%s': %w", commit, err)
+			}
+		}
+
+		// Force-update the original branch to point to our temporary branch
+		forceUpdateCmd := exec.Command("git", "branch", "-f", db.Name, tempBranch)
+		forceUpdateCmd.Stdout = os.Stdout
+		forceUpdateCmd.Stderr = os.Stderr
+		if err := forceUpdateCmd.Run(); err != nil {
+			return fmt.Errorf("failed to update branch '%s': %w", db.Name, err)
+		}
+
+		// Checkout the updated branch
+		checkoutUpdatedCmd := exec.Command("git", "checkout", db.Name)
+		checkoutUpdatedCmd.Stdout = os.Stdout
+		checkoutUpdatedCmd.Stderr = os.Stderr
+		if err := checkoutUpdatedCmd.Run(); err != nil {
+			return fmt.Errorf("failed to checkout updated branch '%s': %w", db.Name, err)
+		}
+
+		// Delete the temporary branch
+		deleteTempCmd := exec.Command("git", "branch", "-D", tempBranch)
+		deleteTempCmd.Stdout = os.Stdout
+		deleteTempCmd.Stderr = os.Stderr
+		if err := deleteTempCmd.Run(); err != nil {
+			fmt.Printf("Warning: Failed to delete temporary branch '%s'\n", tempBranch)
+		}
+
+		fmt.Printf("Successfully rebased '%s' onto '%s'\n", db.Name, db.BaseBranchName)
+	}
+
+	// Restore the original branch
+	checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
+	checkoutOriginalCmd.Stdout = os.Stdout
+	checkoutOriginalCmd.Stderr = os.Stderr
+	if err := checkoutOriginalCmd.Run(); err != nil {
+		fmt.Printf("Warning: Failed to checkout original branch '%s'\n", originalBranch)
+	}
+
+	fmt.Println("All diverged branches have been successfully rebased!")
+	return nil
+}
+
+type RebaseUndoCmd struct {
+}
+
+func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
+	// Get the repository path
+	repoPath, err := GetCurrentRepository()
+	if err != nil {
+		return fmt.Errorf("failed to get current repository: %w", err)
+	}
+
+	// Load configuration
+	config, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Find repo entry in config
+	repo := FindRepoByPath(config, repoPath)
+	if repo == nil {
+		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
+	}
+
+	// Check if a current tower is set
+	if repo.Current == "" {
+		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
+	}
+
+	// Get current tower
+	currentTower := FindTowerByName(repo, repo.Current)
+	if currentTower == nil {
+		return fmt.Errorf("current tower '%s' not found", repo.Current)
+	}
+
+	// Check if there's a stored rebase timestamp
+	if currentTower.LastRebased == "" {
+		return fmt.Errorf("no previous rebase found for tower '%s'", currentTower.Name)
+	}
+
+	// Check if any branches have stored reflog IDs
+	branchesToRestore := 0
+	for _, branch := range currentTower.Branches {
+		if branch.LastReflogID != "" {
+			branchesToRestore++
+		}
+	}
+
+	if branchesToRestore == 0 {
+		return fmt.Errorf("no branch states found to restore in tower '%s'", currentTower.Name)
+	}
+
+	// Open the repository
+	gitRepo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
+		DetectDotGit: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	// Create color formatters
+	warningColor := color.New(color.FgRed).Add(color.Bold)
+
+	// Show warning about undo
+	warningColor.Println("\nWARNING: Undoing a rebase will reset your branches to their previous state.")
+	warningColor.Printf("This will restore %d branches to their state before the rebase on %s.\n",
+		branchesToRestore, currentTower.LastRebased)
+	warningColor.Println("Any changes made after the rebase will be lost.")
+
+	// Prompt for confirmation
+	fmt.Print("\nDo you want to proceed with undoing the last rebase? [y/N]: ")
+
+	// Read response
+	var response string
+	fmt.Scanln(&response)
+
+	// Check if user confirmed
+	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+		fmt.Println("Undo operation cancelled.")
+		return nil
+	}
+
+	// Get the current branch to restore it at the end
+	head, err := gitRepo.Head()
+	if err != nil {
+		return fmt.Errorf("failed to get current branch: %w", err)
+	}
+	originalBranch := head.Name().Short()
+
+	// For each branch in the tower, try to restore it using its stored reflog ID
+	for i := len(currentTower.Branches) - 1; i >= 0; i-- {
+		branch := &currentTower.Branches[i]
+
+		// Skip branches without a stored reflog ID
+		if branch.LastReflogID == "" {
+			continue
+		}
+
+		// Try to restore the branch
+		fmt.Printf("Attempting to restore branch '%s'...\n", branch.Name)
+
+		// Check if branch exists
+		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
+		_, err := gitRepo.Reference(branchRefName, true)
+		branchExists := err == nil
+
+		// Reset the branch to its stored state
+		var cmd *exec.Cmd
+		if branchExists {
+			// Force-reset an existing branch
+			cmd = exec.Command("git", "update-ref", branchRefName.String(), branch.LastReflogID)
+		} else {
+			// Create a new branch at the stored commit point
+			cmd = exec.Command("git", "branch", branch.Name, branch.LastReflogID)
+		}
+
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("Warning: Failed to restore branch '%s'\n", branch.Name)
+		} else {
+			fmt.Printf("Successfully restored branch '%s'\n", branch.Name)
+			// Clear the stored reflog ID
+			branch.LastReflogID = ""
+		}
+	}
+
+	// Clear the stored rebase timestamp
+	currentTower.LastRebased = ""
+
+	// Save the configuration with cleared reflog IDs
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to update configuration: %w", err)
+	}
+
+	// Restore the original branch
+	checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
+	checkoutOriginalCmd.Stdout = os.Stdout
+	checkoutOriginalCmd.Stderr = os.Stderr
+	if err := checkoutOriginalCmd.Run(); err != nil {
+		fmt.Printf("Warning: Failed to checkout original branch '%s'\n", originalBranch)
+	}
+
+	fmt.Println("Successfully undid the last rebase!")
+	return nil
+}
+
 type CLI struct {
 	Globals
 
@@ -698,6 +1122,7 @@ type CLI struct {
 	Rename  RenameCmd  `cmd:"rename" help:"Rename the current tower"`
 	Base    BaseCmd    `cmd:"base" help:"Set the tower's base commit"`
 	Rm      RmTowerCmd `cmd:"rm" help:"Remove the specified tower"`
+	Rebase  RebaseCmd  `cmd:"rebase" help:"Rebase operations for the current tower"`
 }
 
 func main() {
