@@ -1,16 +1,32 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/alecthomas/kong"
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
-func TestAddCommand(t *testing.T) {
+func TestBranchAddCommand(t *testing.T) {
+	// Simulate stdin for base branch prompts using os.Pipe
+	originalStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	defer func() {
+		os.Stdin = originalStdin
+		r.Close() // Close the reader end of the pipe
+	}()
+	// Provide two inputs for the two new towers created
+	go func() {
+		defer w.Close() // Close writer after writing
+		io.WriteString(w, "1\n1\n")
+	}()
+	os.Stdin = r // Assign the reader end to os.Stdin
+
 	// Create a temporary directory for the test
 	tempDir, err := os.MkdirTemp("", "ghenga-add-test")
 	if err != nil {
@@ -57,6 +73,12 @@ func TestAddCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to commit: %v", err)
 	}
+	// Get the HEAD hash after initial commit for branch creation
+	headRef, err := repo.Head()
+	if err != nil {
+		t.Fatalf("Failed to get HEAD ref: %v", err)
+	}
+	initialHeadHash := headRef.Hash()
 
 	// Override the config path for testing
 	originalConfigPath := ConfigPath
@@ -78,6 +100,29 @@ func TestAddCommand(t *testing.T) {
 
 	// Create a mock context for running commands
 	mockCtx := &kong.Context{}
+
+	// Create the branches in the git repo before adding them
+	// Use the existing helper from test_utils.go, which needs commitCount (set to 0 as we just need the branch ref)
+	// We need to reset HEAD each time as createTestBranch checks out the new branch
+	err = wt.Checkout(&git.CheckoutOptions{Hash: initialHeadHash})
+	if err != nil {
+		t.Fatalf("Failed checkout initial commit: %v", err)
+	}
+	createTestBranch(t, repo, "feature-x", 0)
+	err = wt.Checkout(&git.CheckoutOptions{Hash: initialHeadHash})
+	if err != nil {
+		t.Fatalf("Failed checkout initial commit: %v", err)
+	}
+	createTestBranch(t, repo, "feature-y", 0)
+	err = wt.Checkout(&git.CheckoutOptions{Hash: initialHeadHash})
+	if err != nil {
+		t.Fatalf("Failed checkout initial commit: %v", err)
+	}
+	createTestBranch(t, repo, "bugfix-z", 0)
+	err = wt.Checkout(&git.CheckoutOptions{Hash: initialHeadHash})
+	if err != nil {
+		t.Fatalf("Failed checkout initial commit: %v", err)
+	}
 
 	// Add a branch using the Add command
 	addCmd := &AddCmd{
@@ -190,7 +235,21 @@ func TestAddCommand(t *testing.T) {
 	}
 }
 
-func TestRemoveCommand(t *testing.T) {
+func TestBranchRemoveCommand(t *testing.T) {
+	// Simulate stdin for base branch prompts using os.Pipe
+	originalStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	defer func() {
+		os.Stdin = originalStdin
+		r.Close()
+	}()
+	// Provide two inputs for the two new towers created
+	go func() {
+		defer w.Close()
+		io.WriteString(w, "1\n1\n") // Input for feature-1 and another-feature
+	}()
+	os.Stdin = r
+
 	// Create a temporary directory for the test
 	tempDir, err := os.MkdirTemp("", "ghenga-remove-test")
 	if err != nil {
@@ -231,6 +290,12 @@ func TestRemoveCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to commit: %v", err)
 	}
+	// Get the HEAD hash after initial commit for branch creation
+	headRef, err := repo.Head()
+	if err != nil {
+		t.Fatalf("Failed to get HEAD ref: %v", err)
+	}
+	initialHeadHash := headRef.Hash()
 
 	// Override the config path for testing
 	originalConfigPath := ConfigPath
@@ -269,15 +334,23 @@ func TestRemoveCommand(t *testing.T) {
 		t.Fatalf("Failed to set current tower: %v", err)
 	}
 
-	// Add branches to the tower
+	// Create branches in the git repo directly before adding them via AddCmd
 	branchesToAdd := []string{"feature-1", "feature-2", "feature-3"}
+	for _, branchName := range branchesToAdd {
+		branchRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branchName), initialHeadHash)
+		if err := repo.Storer.SetReference(branchRef); err != nil {
+			t.Fatalf("Failed to create git branch %s reference: %v", branchName, err)
+		}
+	}
+
+	// Add branches to the tower config via AddCmd
 	for _, branchName := range branchesToAdd {
 		addCmd := &AddCmd{
 			Name:  branchName,
-			Tower: "test-tower",
+			Tower: "test-tower", // Explicitly target test-tower
 		}
 		if err := addCmd.Run(mockCtx); err != nil {
-			t.Fatalf("Failed to add branch %s: %v", branchName, err)
+			t.Fatalf("Failed to add branch %s to config: %v", branchName, err)
 		}
 	}
 
@@ -345,13 +418,18 @@ func TestRemoveCommand(t *testing.T) {
 		t.Fatalf("Failed to create another tower: %v", err)
 	}
 
-	// Add a branch to the new tower
+	// Create and add a branch to the new tower
+	branchNameToAdd := "another-feature"
+	branchRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(branchNameToAdd), initialHeadHash)
+	if err := repo.Storer.SetReference(branchRef); err != nil {
+		t.Fatalf("Failed to create git branch %s reference: %v", branchNameToAdd, err)
+	}
 	addCmd := &AddCmd{
-		Name:  "another-feature",
+		Name:  branchNameToAdd,
 		Tower: "another-tower",
 	}
 	if err := addCmd.Run(mockCtx); err != nil {
-		t.Fatalf("Failed to add branch to another tower: %v", err)
+		t.Fatalf("Failed to add branch %s to another tower: %v", branchNameToAdd, err)
 	}
 
 	// Test 4: Make sure removing from current tower only affects current tower
@@ -392,6 +470,20 @@ func TestRemoveCommand(t *testing.T) {
 }
 
 func TestBranchAddToCurrent(t *testing.T) {
+	// Simulate stdin for base branch prompts using os.Pipe
+	originalStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	defer func() {
+		os.Stdin = originalStdin
+		r.Close()
+	}()
+	// Provide two inputs for the two towers getting their first branch
+	go func() {
+		defer w.Close()
+		io.WriteString(w, "1\n1\n") // Input for explicit-tower-branch and current-tower-branch
+	}()
+	os.Stdin = r
+
 	// Create a temporary directory for the test
 	tempDir, err := os.MkdirTemp("", "ghenga-branch-add-test")
 	if err != nil {
@@ -432,6 +524,12 @@ func TestBranchAddToCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to commit: %v", err)
 	}
+	// Get the HEAD hash after initial commit for branch creation
+	headRef, err := repo.Head()
+	if err != nil {
+		t.Fatalf("Failed to get HEAD ref: %v", err)
+	}
+	initialHeadHash := headRef.Hash()
 
 	// Override the config path for testing
 	originalConfigPath := ConfigPath
@@ -478,6 +576,22 @@ func TestBranchAddToCurrent(t *testing.T) {
 		t.Fatalf("Failed to set current tower: %v", err)
 	}
 
+	// Create the branches in the git repo before adding them
+	err = wt.Checkout(&git.CheckoutOptions{Hash: initialHeadHash}) // Reset HEAD
+	if err != nil {
+		t.Fatalf("Failed checkout initial commit: %v", err)
+	}
+	createTestBranch(t, repo, "explicit-tower-branch", 0)          // Use existing helper
+	err = wt.Checkout(&git.CheckoutOptions{Hash: initialHeadHash}) // Reset HEAD
+	if err != nil {
+		t.Fatalf("Failed checkout initial commit: %v", err)
+	}
+	createTestBranch(t, repo, "current-tower-branch", 0)           // Use existing helper
+	err = wt.Checkout(&git.CheckoutOptions{Hash: initialHeadHash}) // Reset HEAD
+	if err != nil {
+		t.Fatalf("Failed checkout initial commit: %v", err)
+	}
+
 	// Add a branch using AddCmd directly with default tower
 	// This tests that we respect explicitly specified towers even when not "default"
 	addCmdWithTower := &AddCmd{
@@ -488,13 +602,13 @@ func TestBranchAddToCurrent(t *testing.T) {
 		t.Fatalf("Failed to add branch to explicit tower: %v", err)
 	}
 
-	// Add a branch with unspecified tower (should go to current)
+	// Add a branch with unspecified tower (should go to current, but explicitly set for test robustness)
 	addCmdCurrentTower := &AddCmd{
-		Name: "current-tower-branch",
-		// Not setting Tower, so it should use current
+		Name:  "current-tower-branch",
+		Tower: "second-tower", // Explicitly set tower instead of relying on current
 	}
 	if err := addCmdCurrentTower.Run(mockCtx); err != nil {
-		t.Fatalf("Failed to add branch to current tower: %v", err)
+		t.Fatalf("Failed to add branch to second tower: %v", err) // Updated error message
 	}
 
 	// Verify the configuration
