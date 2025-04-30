@@ -20,14 +20,7 @@ func TestLsCmd_NoTowers(t *testing.T) {
 	defer cleanup()
 
 	// Initialize empty config
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:   repoPath,
-				Towers: []*Tower{},
-			},
-		},
-	}
+	config := createTestConfig(t, repoPath, "", []*Tower{}, "")
 
 	// Run the list command
 	output := runLsCommandWithConfig(t, config, &LsCmd{})
@@ -42,19 +35,13 @@ func TestLsCmd_OneTowerNoRepositories(t *testing.T) {
 	defer cleanup()
 
 	// Initialize config with one tower but no branches
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path: repoPath,
-				Towers: []*Tower{
-					{
-						Name:     "test-tower",
-						Branches: []Branch{},
-					},
-				},
-			},
+	towers := []*Tower{
+		{
+			Name:     "test-tower",
+			Branches: []Branch{},
 		},
 	}
+	config := createTestConfig(t, repoPath, "", towers, "")
 
 	// Run the list command
 	output := runLsCommandWithConfig(t, config, &LsCmd{})
@@ -65,7 +52,7 @@ func TestLsCmd_OneTowerNoRepositories(t *testing.T) {
 }
 
 func TestLsCmd_OneTowerOneBranchNoCommits(t *testing.T) {
-	// Setup test environment and get repo object
+	// Setup test environment
 	repoPath, repo, cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -78,21 +65,15 @@ func TestLsCmd_OneTowerOneBranchNoCommits(t *testing.T) {
 	require.NoError(t, err)
 
 	// Initialize config with one tower and one branch
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path: repoPath,
-				Towers: []*Tower{
-					{
-						Name: "test-tower",
-						Branches: []Branch{
-							{Name: branchName},
-						},
-					},
-				},
+	towers := []*Tower{
+		{
+			Name: "test-tower",
+			Branches: []Branch{
+				{Name: branchName},
 			},
 		},
 	}
+	config := createTestConfig(t, repoPath, "", towers, "")
 
 	// Run the list command
 	output := runLsCommandWithConfig(t, config, &LsCmd{})
@@ -113,21 +94,15 @@ func TestLsCmd_OneTowerOneBranchWithCommits(t *testing.T) {
 	createTestBranch(t, repo, branchName, 3)
 
 	// Initialize config with one tower and one branch
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path: repoPath,
-				Towers: []*Tower{
-					{
-						Name: "test-tower",
-						Branches: []Branch{
-							{Name: branchName},
-						},
-					},
-				},
+	towers := []*Tower{
+		{
+			Name: "test-tower",
+			Branches: []Branch{
+				{Name: branchName},
 			},
 		},
 	}
+	config := createTestConfig(t, repoPath, "", towers, "")
 
 	// Run the list command
 	output := runLsCommandWithConfig(t, config, &LsCmd{})
@@ -159,29 +134,23 @@ func TestLsCmd_MultipleTowersMultipleBranches(t *testing.T) {
 	createTestBranch(t, repo, "bugfix-2", 2)
 
 	// Initialize config with multiple towers and branches
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path: repoPath,
-				Towers: []*Tower{
-					{
-						Name: "feature-tower",
-						Branches: []Branch{
-							{Name: "feature-1"},
-							{Name: "feature-2"},
-						},
-					},
-					{
-						Name: "bugfix-tower",
-						Branches: []Branch{
-							{Name: "bugfix-1"},
-							{Name: "bugfix-2"},
-						},
-					},
-				},
+	towers := []*Tower{
+		{
+			Name: "feature-tower",
+			Branches: []Branch{
+				{Name: "feature-1"},
+				{Name: "feature-2"},
+			},
+		},
+		{
+			Name: "bugfix-tower",
+			Branches: []Branch{
+				{Name: "bugfix-1"},
+				{Name: "bugfix-2"},
 			},
 		},
 	}
+	config := createTestConfig(t, repoPath, "", towers, "")
 
 	// Run the list command
 	output := runLsCommandWithConfig(t, config, &LsCmd{})
@@ -227,27 +196,21 @@ func TestLsCmd_FilterByTowerName(t *testing.T) {
 	createTestBranch(t, repo, "bugfix-1", 1)
 
 	// Initialize config with multiple towers and branches
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path: repoPath,
-				Towers: []*Tower{
-					{
-						Name: "feature-tower",
-						Branches: []Branch{
-							{Name: "feature-1"},
-						},
-					},
-					{
-						Name: "bugfix-tower",
-						Branches: []Branch{
-							{Name: "bugfix-1"},
-						},
-					},
-				},
+	towers := []*Tower{
+		{
+			Name: "feature-tower",
+			Branches: []Branch{
+				{Name: "feature-1"},
+			},
+		},
+		{
+			Name: "bugfix-tower",
+			Branches: []Branch{
+				{Name: "bugfix-1"},
 			},
 		},
 	}
+	config := createTestConfig(t, repoPath, "", towers, "")
 
 	// Run the list command with tower filter
 	cmd := &LsCmd{TowerName: "feature-tower"}
@@ -293,27 +256,19 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 	createTestBranch(t, repo, "feature-top", 2)
 
 	// Initialize config with one tower and a stack of branches in order
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:    repoPath,
-				Current: "stacked-tower",
-				Towers: []*Tower{
-					{
-						Name: "stacked-tower",
-						Base: mainHash.String(), // Set the main commit as the base
-						Branches: []Branch{
-							{Name: "feature-base"},
-							{Name: "feature-middle"},
-							{Name: "feature-top"},
-						},
-					},
-				},
+	towerName := "stacked-tower"
+	towers := []*Tower{
+		{
+			Name: towerName,
+			// Base is set via createTestConfig
+			Branches: []Branch{
+				{Name: "feature-base"},
+				{Name: "feature-middle"},
+				{Name: "feature-top"},
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
+	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
 
 	// Run the list command
 	cmd := &LsCmd{}
@@ -374,9 +329,7 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 
 	// Test case for when the tower has no base commit set
 	config.Repos[0].Towers[0].Base = ""
-	err = SaveConfig(config)
-	require.NoError(t, err)
-
+	// Rerun with modified config
 	outputNoBase := runLsCommandWithConfig(t, config, cmd)
 
 	// Verify output without base
@@ -500,25 +453,19 @@ func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 	require.NoError(t, err)
 
 	// Initialize config with one tower and all branches in order
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:    repoPath,
-				Current: "test-tower",
-				Towers: []*Tower{
-					{
-						Name: "test-tower",
-						Base: mainHash.String(),
-						Branches: []Branch{
-							{Name: "base-branch"},
-							{Name: "middle-branch"},
-							{Name: "top-branch"},
-						},
-					},
-				},
+	towerName := "test-tower"
+	towers := []*Tower{
+		{
+			Name: towerName,
+			// Base is set via createTestConfig
+			Branches: []Branch{
+				{Name: "base-branch"},
+				{Name: "middle-branch"},
+				{Name: "top-branch"},
 			},
 		},
 	}
+	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
 
 	// Run the list command
 	cmd := &LsCmd{}
@@ -680,44 +627,20 @@ func TestLsCmd_TopBranchDivergence(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
-
 	// Initialize config with one tower and all branches in order
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:    repoPath,
-				Current: "test-tower",
-				Towers: []*Tower{
-					{
-						Name: "test-tower",
-						Base: mainHash.String(),
-						Branches: []Branch{
-							{Name: "base-branch"},
-							{Name: "middle-branch"},
-							{Name: "top-branch"},
-						},
-					},
-				},
+	towerName := "test-tower"
+	towers := []*Tower{
+		{
+			Name: towerName,
+			// Base is set via createTestConfig
+			Branches: []Branch{
+				{Name: "base-branch"},
+				{Name: "middle-branch"},
+				{Name: "top-branch"},
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
+	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
 
 	// Run the list command
 	cmd := &LsCmd{}
@@ -930,26 +853,20 @@ func TestLsCmd_MultipleDivergences(t *testing.T) {
 	require.NoError(t, err)
 
 	// Initialize config with one tower and all branches in order
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:    repoPath,
-				Current: "test-tower",
-				Towers: []*Tower{
-					{
-						Name: "test-tower",
-						Base: mainHash.String(),
-						Branches: []Branch{
-							{Name: "base-branch"},
-							{Name: "middle-branch"},
-							{Name: "third-branch"},
-							{Name: "top-branch"},
-						},
-					},
-				},
+	towerName := "test-tower"
+	towers := []*Tower{
+		{
+			Name: towerName,
+			// Base is set via createTestConfig
+			Branches: []Branch{
+				{Name: "base-branch"},
+				{Name: "middle-branch"},
+				{Name: "third-branch"},
+				{Name: "top-branch"},
 			},
 		},
 	}
+	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
 
 	// Run the list command
 	cmd := &LsCmd{}
@@ -999,23 +916,17 @@ func TestLsCmd_BaseBranchMissingWarning(t *testing.T) {
 	createTestBranch(t, repo, featureBranchName, 1)
 
 	// Initialize config with the tower
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:    repoPath,
-				Current: "test-tower",
-				Towers: []*Tower{
-					{
-						Name: "test-tower",
-						Branches: []Branch{
-							{Name: baseBranchName},
-							{Name: featureBranchName},
-						},
-					},
-				},
+	towerName := "test-tower"
+	towers := []*Tower{
+		{
+			Name: towerName,
+			Branches: []Branch{
+				{Name: baseBranchName},
+				{Name: featureBranchName},
 			},
 		},
 	}
+	config := createTestConfig(t, repoPath, towerName, towers, "")
 
 	// Delete the base branch from the git repository
 	err := repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(baseBranchName))

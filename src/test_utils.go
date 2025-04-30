@@ -185,3 +185,22 @@ func runLsCommandWithConfig(t *testing.T, config *Config, cmd *LsCmd) string {
 
 	return output
 }
+
+// createTestConfig creates a standard Config object for tests with a single repo.
+// Optionally sets the Base commit on the first tower.
+func createTestConfig(t *testing.T, repoPath string, currentTower string, towers []*Tower, baseCommit string) *Config {
+	t.Helper()
+	// Set base on the first tower if provided and towers exist
+	if baseCommit != "" && len(towers) > 0 {
+		towers[0].Base = baseCommit
+	}
+	return &Config{
+		Repos: []*Repo{
+			{
+				Path:    repoPath,
+				Current: currentTower,
+				Towers:  towers,
+			},
+		},
+	}
+}
