@@ -10,6 +10,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// KongRunnable defines an interface for commands that can be run via Kong.
+// This helps in creating generic test helpers.
+type KongRunnable interface {
+	Run(*kong.Context) error
+}
+
+// runTowerCommandAndGetRepo runs a KongRunnable command, reloads the config,
+// finds the repo config for the given path, and returns it along with any error
+// from the command execution.
+func runTowerCommandAndGetRepo(t *testing.T, cmd KongRunnable, ctx *kong.Context, repoPath string) (*Repo, error) {
+	t.Helper()
+	runErr := cmd.Run(ctx) // Run the command first
+
+	config, err := LoadConfig()
+	// Use require for fatal errors in test setup/verification steps
+	require.NoError(t, err, "Failed to load config after running command")
+
+	repoConfig := FindRepoByPath(config, repoPath)
+	require.NotNil(t, repoConfig, "Repository %s not found in config after running command", repoPath)
+
+	return repoConfig, runErr // Return the repo state *after* the command ran, and the command's error
+}
+
 func TestTower_NewCommand(t *testing.T) {
 	// Setup test environment (handles repo, config, CWD)
 	repoPath, _, cleanup := setupTestEnv(t)
@@ -103,44 +126,29 @@ func TestTower_CurrentCommand(t *testing.T) {
 	currentCmd := &CurrentCmd{
 		Tower: "tower-2",
 	}
-	err = currentCmd.Run(mockCtx)
+	repoConfig, err := runTowerCommandAndGetRepo(t, currentCmd, mockCtx, repoPath)
 	require.NoError(t, err, "Failed to run Current command")
-
-	// Verify the configuration was updated correctly
-	config, err = LoadConfig()
-	require.NoError(t, err, "Failed to load config")
-
 	// Verify the current tower is set
-	repo := FindRepoByPath(config, repoPath)
-	require.NotNil(t, repo, "Repository not found in config")
-	assert.Equal(t, "tower-2", repo.Current, "Expected current tower to be 'tower-2'")
+	assert.Equal(t, "tower-2", repoConfig.Current, "Expected current tower to be 'tower-2'")
 
 	// Test setting another tower as current
 	currentCmd = &CurrentCmd{
 		Tower: "tower-1",
 	}
-	err = currentCmd.Run(mockCtx)
+	repoConfig, err = runTowerCommandAndGetRepo(t, currentCmd, mockCtx, repoPath)
 	require.NoError(t, err, "Failed to run Current command")
-
-	// Verify the configuration was updated correctly
-	config, err = LoadConfig()
-	require.NoError(t, err, "Failed to load config")
-
 	// Verify the current tower is updated
-	repo = FindRepoByPath(config, repoPath)
-	assert.Equal(t, "tower-1", repo.Current, "Expected current tower to be 'tower-1'")
+	assert.Equal(t, "tower-1", repoConfig.Current, "Expected current tower to be 'tower-1'")
 
 	// Test setting a nonexistent tower (should fail)
 	invalidCmd := &CurrentCmd{
 		Tower: "nonexistent-tower",
 	}
-	err = invalidCmd.Run(mockCtx)
+	repoConfig, err = runTowerCommandAndGetRepo(t, invalidCmd, mockCtx, repoPath)
 	assert.Error(t, err, "Expected error when setting nonexistent tower as current")
 
-	// The current tower should still be tower-1
-	config, _ = LoadConfig()
-	repo = FindRepoByPath(config, repoPath)
-	assert.Equal(t, "tower-1", repo.Current, "Current tower should still be 'tower-1'")
+	// The current tower should still be tower-1 (check the latest loaded state)
+	assert.Equal(t, "tower-1", repoConfig.Current, "Current tower should still be 'tower-1'")
 }
 
 func TestTower_GetCurrentTower(t *testing.T) {
@@ -226,23 +234,16 @@ func TestTower_RenameCommand(t *testing.T) {
 	require.NoError(t, err)
 
 	// Test renaming the current tower
-	err = renameCmd.Run(mockCtx)
+	repoConfig, err := runTowerCommandAndGetRepo(t, renameCmd, mockCtx, repoPath)
 	require.NoError(t, err, "Failed to run Rename command")
 
-	// Verify the configuration was updated correctly
-	config, err = LoadConfig()
-	require.NoError(t, err, "Failed to load config")
-
 	// Verify the tower was renamed
-	repo := FindRepoByPath(config, repoPath)
-	require.NotNil(t, repo, "Repository not found in config")
-
 	// The current tower should be updated to the new name
-	assert.Equal(t, "renamed-tower", repo.Current, "Current tower reference should be updated")
+	assert.Equal(t, "renamed-tower", repoConfig.Current, "Current tower reference should be updated")
 
 	// Check that the tower was actually renamed
 	var foundRenamedTower bool
-	for _, tower := range repo.Towers {
+	for _, tower := range repoConfig.Towers {
 		if tower.Name == "renamed-tower" {
 			foundRenamedTower = true
 			break
@@ -252,7 +253,7 @@ func TestTower_RenameCommand(t *testing.T) {
 
 	// The old tower name should no longer exist
 	var foundOldTower bool
-	for _, tower := range repo.Towers {
+	for _, tower := range repoConfig.Towers {
 		if tower.Name == "tower-1" {
 			foundOldTower = true
 			break
@@ -277,7 +278,7 @@ func TestTower_RenameCommand(t *testing.T) {
 	renameCmd = &RenameCmd{
 		NewName: "another-name",
 	}
-	err = renameCmd.Run(mockCtx)
+	_, err = runTowerCommandAndGetRepo(t, renameCmd, mockCtx, repoPath)
 	assert.Error(t, err, "Expected error when current tower doesn't exist")
 	assert.Contains(t, err.Error(), "not found", "Error should mention that the current tower was not found")
 }
@@ -315,20 +316,12 @@ func TestTower_BaseCommand(t *testing.T) {
 	baseCmd := &BaseCmd{
 		Commit: baseCommit,
 	}
-	err = baseCmd.Run(mockCtx)
+	repoConfig, err := runTowerCommandAndGetRepo(t, baseCmd, mockCtx, repoPath)
 	require.NoError(t, err, "Failed to run Base command")
 
-	// Verify the configuration was updated correctly
-	config, err = LoadConfig()
-	require.NoError(t, err, "Failed to load config")
-
 	// Verify the base commit was set
-	repo1 := FindRepoByPath(config, repoPath)
-	require.NotNil(t, repo1, "Repository not found in config")
-
-	tower := FindTowerByName(repo1, towerName)
+	tower := FindTowerByName(repoConfig, towerName)
 	require.NotNil(t, tower, "Tower not found in config")
-
 	assert.Equal(t, baseCommit, tower.Base, "Base commit should be set correctly")
 
 	// Test with no current tower set
@@ -352,7 +345,7 @@ func TestTower_BaseCommand(t *testing.T) {
 	invalidBaseCmd := &BaseCmd{
 		Commit: "nonexistentcommit",
 	}
-	err = invalidBaseCmd.Run(mockCtx)
+	_, err = runTowerCommandAndGetRepo(t, invalidBaseCmd, mockCtx, repoPath)
 	assert.Error(t, err, "Base should fail with non-existent commit")
 	assert.Contains(t, err.Error(), "failed to resolve commit", "Error should mention that the commit could not be resolved")
 }
@@ -425,8 +418,6 @@ func TestTower_RmTowerCommand(t *testing.T) {
 	// Verify the configuration was updated correctly
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
-
-	// Verify the tower was removed
 	repoConfig := FindRepoByPath(config, repoPath)
 	require.NotNil(t, repoConfig, "Repository not found in config")
 
@@ -434,14 +425,7 @@ func TestTower_RmTowerCommand(t *testing.T) {
 	assert.Equal(t, 2, len(repoConfig.Towers), "Expected 2 towers after removal")
 
 	// Check that the removed tower doesn't exist
-	var foundTower3 bool
-	for _, tower := range repoConfig.Towers {
-		if tower.Name == "tower-3" {
-			foundTower3 = true
-			break
-		}
-	}
-	assert.False(t, foundTower3, "Tower 'tower-3' should no longer exist")
+	assert.Nil(t, FindTowerByName(repoConfig, "tower-3"), "Tower 'tower-3' should no longer exist")
 
 	// Current tower should still be set
 	assert.Equal(t, "tower-1", repoConfig.Current, "Current tower should still be 'tower-1'")
@@ -477,11 +461,12 @@ func TestTower_RmTowerCommand(t *testing.T) {
 	// Verify the configuration was updated correctly
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
-
 	repoConfig = FindRepoByPath(config, repoPath)
+	require.NotNil(t, repoConfig, "Repository not found in config")
 
 	// Only one tower should remain
 	assert.Equal(t, 1, len(repoConfig.Towers), "Expected 1 tower after removing current tower")
+	assert.Nil(t, FindTowerByName(repoConfig, "tower-1"), "Tower 'tower-1' should no longer exist")
 
 	// Current tower reference should be empty
 	assert.Equal(t, "", repoConfig.Current, "Current tower should be unset after removing it")
@@ -515,10 +500,10 @@ func TestTower_RmTowerCommand(t *testing.T) {
 	// Verify the configuration was not changed
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
-
 	repoConfig = FindRepoByPath(config, repoPath)
+	require.NotNil(t, repoConfig, "Repository not found in config")
 	assert.Equal(t, 1, len(repoConfig.Towers), "Expected tower to still exist after cancellation")
-	assert.Equal(t, "tower-2", repoConfig.Towers[0].Name, "tower-2 should still exist")
+	assert.NotNil(t, FindTowerByName(repoConfig, "tower-2"), "tower-2 should still exist")
 
 	// Test 4: Try to remove a non-existent tower
 	rmNonExistentCmd := &RmTowerCmd{
@@ -557,7 +542,7 @@ func TestTower_RmTowerCommand(t *testing.T) {
 	// Verify the configuration was updated correctly
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
-
 	repoConfig = FindRepoByPath(config, repoPath)
+	require.NotNil(t, repoConfig, "Repository not found in config")
 	assert.Equal(t, 0, len(repoConfig.Towers), "Expected 0 towers after removing the last tower")
 }
