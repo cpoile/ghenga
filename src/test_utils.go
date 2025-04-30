@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -90,6 +91,41 @@ func createTestBranch(t *testing.T, repo *git.Repository, branchName string, com
 	}
 }
 
+// setupTestEnv handles common test setup:
+// - Creates a temporary repo.
+// - Changes CWD to the repo path.
+// - Creates a temporary config file.
+// - Mocks the global ConfigPath function.
+// Returns the repo path, repo object, and a cleanup function.
+func setupTestEnv(t *testing.T) (string, *git.Repository, func()) {
+	t.Helper()
+
+	repoPath, repo := setupTestRepo(t)
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	err = os.Chdir(repoPath)
+	require.NoError(t, err)
+
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	configFilePath := configFile.Name()
+	// Close the file immediately as we only need its path
+	require.NoError(t, configFile.Close())
+
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFilePath)
+
+	cleanup := func() {
+		ConfigPath = oldConfigPath
+		os.Remove(configFilePath)
+		os.Chdir(oldWd)
+		os.RemoveAll(repoPath)
+	}
+
+	return repoPath, repo, cleanup
+}
+
 // mockedConfigPath creates a function that returns a temporary config path
 func mockedConfigPath(tempPath string) ConfigPathFunc {
 	return func() (string, error) {
@@ -128,4 +164,24 @@ func CaptureOutput(f func() error) (string, error) {
 	io.Copy(&buf, r)
 
 	return buf.String(), err
+}
+
+// runLsCommandWithConfig saves the provided config, runs the LsCmd, and returns the captured output.
+func runLsCommandWithConfig(t *testing.T, config *Config, cmd *LsCmd) string {
+	t.Helper()
+
+	err := SaveConfig(config)
+	require.NoError(t, err, "Failed to save config")
+
+	// Create a mock context for running commands (needed for some Run() calls)
+	// It's okay if it's not always used.
+	// TODO: Investigate if a nil context is always sufficient or if we need a more sophisticated mock.
+	mockCtx := &kong.Context{}
+
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(mockCtx)
+	})
+	require.NoError(t, err, "LsCmd.Run failed")
+
+	return output
 }

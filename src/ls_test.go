@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alecthomas/kong"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -16,25 +15,9 @@ import (
 )
 
 func TestLsCmd_NoTowers(t *testing.T) {
-	// Setup test repository
-	repoPath, _ := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
-
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
+	// Setup test environment
+	repoPath, _, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Initialize empty config
 	config := &Config{
@@ -45,40 +28,18 @@ func TestLsCmd_NoTowers(t *testing.T) {
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(nil)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, &LsCmd{})
 
 	// Verify output doesn't contain any towers
 	assert.NotContains(t, output, "Tower:")
 }
 
 func TestLsCmd_OneTowerNoRepositories(t *testing.T) {
-	// Setup test repository
-	repoPath, _ := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
-
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
+	// Setup test environment
+	repoPath, _, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Initialize config with one tower but no branches
 	config := &Config{
@@ -94,15 +55,9 @@ func TestLsCmd_OneTowerNoRepositories(t *testing.T) {
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(nil)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, &LsCmd{})
 
 	// Verify output
 	assert.Contains(t, output, "Tower: test-tower")
@@ -110,9 +65,9 @@ func TestLsCmd_OneTowerNoRepositories(t *testing.T) {
 }
 
 func TestLsCmd_OneTowerOneBranchNoCommits(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Create a branch but don't add any commits
 	branchName := "feature-branch"
@@ -122,22 +77,6 @@ func TestLsCmd_OneTowerOneBranchNoCommits(t *testing.T) {
 	err = repo.Storer.SetReference(branchRef)
 	require.NoError(t, err)
 
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
-
 	// Initialize config with one tower and one branch
 	config := &Config{
 		Repos: []*Repo{
@@ -154,15 +93,9 @@ func TestLsCmd_OneTowerOneBranchNoCommits(t *testing.T) {
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(nil)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, &LsCmd{})
 
 	// Verify output
 	assert.Contains(t, output, "Tower: test-tower")
@@ -171,29 +104,13 @@ func TestLsCmd_OneTowerOneBranchNoCommits(t *testing.T) {
 }
 
 func TestLsCmd_OneTowerOneBranchWithCommits(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Create a branch with commits
 	branchName := "feature-branch"
 	createTestBranch(t, repo, branchName, 3)
-
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
 
 	// Initialize config with one tower and one branch
 	config := &Config{
@@ -211,15 +128,9 @@ func TestLsCmd_OneTowerOneBranchWithCommits(t *testing.T) {
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(nil)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, &LsCmd{})
 
 	// Verify output
 	assert.Contains(t, output, "Tower: test-tower")
@@ -237,31 +148,15 @@ func TestLsCmd_OneTowerOneBranchWithCommits(t *testing.T) {
 }
 
 func TestLsCmd_MultipleTowersMultipleBranches(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Create branches with commits
 	createTestBranch(t, repo, "feature-1", 2)
 	createTestBranch(t, repo, "feature-2", 3)
 	createTestBranch(t, repo, "bugfix-1", 1)
 	createTestBranch(t, repo, "bugfix-2", 2)
-
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
 
 	// Initialize config with multiple towers and branches
 	config := &Config{
@@ -287,15 +182,9 @@ func TestLsCmd_MultipleTowersMultipleBranches(t *testing.T) {
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(nil)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, &LsCmd{})
 
 	// Verify output
 	assert.Contains(t, output, "Tower: feature-tower")
@@ -329,29 +218,13 @@ func TestLsCmd_MultipleTowersMultipleBranches(t *testing.T) {
 }
 
 func TestLsCmd_FilterByTowerName(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Create branches with commits
 	createTestBranch(t, repo, "feature-1", 2)
 	createTestBranch(t, repo, "bugfix-1", 1)
-
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
 
 	// Initialize config with multiple towers and branches
 	config := &Config{
@@ -375,15 +248,10 @@ func TestLsCmd_FilterByTowerName(t *testing.T) {
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
 
 	// Run the list command with tower filter
 	cmd := &LsCmd{TowerName: "feature-tower"}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(nil)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, cmd)
 
 	// Verify output
 	assert.Contains(t, output, "Tower: feature-tower")
@@ -395,9 +263,9 @@ func TestLsCmd_FilterByTowerName(t *testing.T) {
 }
 
 func TestLsCmd_StaggeredCommitView(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Create a stack of branches with specific commits
 	// main -> feature-base -> feature-middle -> feature-top
@@ -424,22 +292,6 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 	// Create feature-top branch with 2 commits
 	createTestBranch(t, repo, "feature-top", 2)
 
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
-
 	// Initialize config with one tower and a stack of branches in order
 	config := &Config{
 		Repos: []*Repo{
@@ -463,15 +315,9 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 	err = SaveConfig(config)
 	require.NoError(t, err)
 
-	// Create a mock context for running commands
-	mockCtx := &kong.Context{}
-
 	// Run the list command
 	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(mockCtx)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, cmd)
 
 	// Verify output
 	// 1. Should contain all three branches in the correct order
@@ -521,10 +367,7 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 
 	// Run the list command with specific tower name
 	cmdWithName := &LsCmd{TowerName: "stacked-tower"}
-	outputWithName, err := CaptureOutput(func() error {
-		return cmdWithName.Run(mockCtx)
-	})
-	require.NoError(t, err)
+	outputWithName := runLsCommandWithConfig(t, config, cmdWithName)
 
 	// Verify filtering by name produces the same output
 	assert.Equal(t, output, outputWithName, "Filtering by tower name should produce the same output")
@@ -534,10 +377,7 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 	err = SaveConfig(config)
 	require.NoError(t, err)
 
-	outputNoBase, err := CaptureOutput(func() error {
-		return cmd.Run(mockCtx)
-	})
-	require.NoError(t, err)
+	outputNoBase := runLsCommandWithConfig(t, config, cmd)
 
 	// Verify output without base
 	assert.Contains(t, outputNoBase, "Tower: stacked-tower")
@@ -545,9 +385,9 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 }
 
 func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Get the initial main branch reference
 	headRef, err := repo.Head()
@@ -659,22 +499,6 @@ func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
-
 	// Initialize config with one tower and all branches in order
 	config := &Config{
 		Repos: []*Repo{
@@ -695,18 +519,10 @@ func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
-
-	// Create a mock context for running commands
-	mockCtx := &kong.Context{}
 
 	// Run the list command
 	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(mockCtx)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, cmd)
 
 	// Verify output
 	assert.Contains(t, output, "Tower: test-tower")
@@ -730,9 +546,9 @@ func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 }
 
 func TestLsCmd_TopBranchDivergence(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Get the initial main branch reference
 	headRef, err := repo.Head()
@@ -903,15 +719,9 @@ func TestLsCmd_TopBranchDivergence(t *testing.T) {
 	err = SaveConfig(config)
 	require.NoError(t, err)
 
-	// Create a mock context for running commands
-	mockCtx := &kong.Context{}
-
 	// Run the list command
 	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(mockCtx)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, cmd)
 
 	// Verify output
 	assert.Contains(t, output, "Tower: test-tower")
@@ -936,9 +746,9 @@ func TestLsCmd_TopBranchDivergence(t *testing.T) {
 }
 
 func TestLsCmd_MultipleDivergences(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Get the initial main branch reference
 	headRef, err := repo.Head()
@@ -1119,22 +929,6 @@ func TestLsCmd_MultipleDivergences(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
-
 	// Initialize config with one tower and all branches in order
 	config := &Config{
 		Repos: []*Repo{
@@ -1156,18 +950,10 @@ func TestLsCmd_MultipleDivergences(t *testing.T) {
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
-
-	// Create a mock context for running commands
-	mockCtx := &kong.Context{}
 
 	// Run the list command
 	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(mockCtx)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, cmd)
 
 	// Verify output
 	assert.Contains(t, output, "Tower: test-tower")
@@ -1202,31 +988,15 @@ func TestLsCmd_MultipleDivergences(t *testing.T) {
 }
 
 func TestLsCmd_BaseBranchMissingWarning(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Create branches
 	baseBranchName := "base-branch"
 	featureBranchName := "feature-branch"
 	createTestBranch(t, repo, baseBranchName, 1)
 	createTestBranch(t, repo, featureBranchName, 1)
-
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
 
 	// Initialize config with the tower
 	config := &Config{
@@ -1246,19 +1016,13 @@ func TestLsCmd_BaseBranchMissingWarning(t *testing.T) {
 			},
 		},
 	}
-	err = SaveConfig(config)
-	require.NoError(t, err)
 
 	// Delete the base branch from the git repository
-	err = repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(baseBranchName))
+	err := repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(baseBranchName))
 	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &LsCmd{}
-	output, err := CaptureOutput(func() error {
-		return cmd.Run(nil)
-	})
-	require.NoError(t, err)
+	output := runLsCommandWithConfig(t, config, &LsCmd{})
 
 	// Verify output contains the warning
 	assert.Contains(t, output, "⚠️ Warning: The base branch is no longer valid")
