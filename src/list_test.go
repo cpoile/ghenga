@@ -49,7 +49,7 @@ func TestListCmd_NoTowers(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &ListCmd{}
+	cmd := &LsCmd{}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(nil)
 	})
@@ -98,7 +98,7 @@ func TestListCmd_OneTowerNoRepositories(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &ListCmd{}
+	cmd := &LsCmd{}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(nil)
 	})
@@ -158,7 +158,7 @@ func TestListCmd_OneTowerOneBranchNoCommits(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &ListCmd{}
+	cmd := &LsCmd{}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(nil)
 	})
@@ -215,7 +215,7 @@ func TestListCmd_OneTowerOneBranchWithCommits(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &ListCmd{}
+	cmd := &LsCmd{}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(nil)
 	})
@@ -291,7 +291,7 @@ func TestListCmd_MultipleTowersMultipleBranches(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run the list command
-	cmd := &ListCmd{}
+	cmd := &LsCmd{}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(nil)
 	})
@@ -379,7 +379,7 @@ func TestListCmd_FilterByTowerName(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run the list command with tower filter
-	cmd := &ListCmd{TowerName: "feature-tower"}
+	cmd := &LsCmd{TowerName: "feature-tower"}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(nil)
 	})
@@ -467,7 +467,7 @@ func TestListCmd_StaggeredCommitView(t *testing.T) {
 	mockCtx := &kong.Context{}
 
 	// Run the list command
-	cmd := &ListCmd{}
+	cmd := &LsCmd{}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(mockCtx)
 	})
@@ -520,7 +520,7 @@ func TestListCmd_StaggeredCommitView(t *testing.T) {
 	assert.NotContains(t, topSection, "file-feature-base", "Top branch section should not contain base branch commits")
 
 	// Run the list command with specific tower name
-	cmdWithName := &ListCmd{TowerName: "stacked-tower"}
+	cmdWithName := &LsCmd{TowerName: "stacked-tower"}
 	outputWithName, err := CaptureOutput(func() error {
 		return cmdWithName.Run(mockCtx)
 	})
@@ -702,7 +702,7 @@ func TestListCmd_MiddleBranchDivergence(t *testing.T) {
 	mockCtx := &kong.Context{}
 
 	// Run the list command
-	cmd := &ListCmd{}
+	cmd := &LsCmd{}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(mockCtx)
 	})
@@ -907,7 +907,7 @@ func TestListCmd_TopBranchDivergence(t *testing.T) {
 	mockCtx := &kong.Context{}
 
 	// Run the list command
-	cmd := &ListCmd{}
+	cmd := &LsCmd{}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(mockCtx)
 	})
@@ -1163,7 +1163,7 @@ func TestListCmd_MultipleDivergences(t *testing.T) {
 	mockCtx := &kong.Context{}
 
 	// Run the list command
-	cmd := &ListCmd{}
+	cmd := &LsCmd{}
 	output, err := CaptureOutput(func() error {
 		return cmd.Run(mockCtx)
 	})

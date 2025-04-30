@@ -460,7 +460,7 @@ func TestRebaseAndUndoWithActualRepo(t *testing.T) {
 	// 1. Create functions to capture command output
 	captureListOutput := func() string {
 		output, err := CaptureOutput(func() error {
-			listCmd := &ListCmd{}
+			listCmd := &LsCmd{}
 			return listCmd.Run(nil)
 		})
 		if err != nil {

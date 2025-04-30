@@ -7,12 +7,15 @@ import (
 	"strings"
 	"time"
 
+	"slices"
+
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	kongcompletion "github.com/jotaen/kong-completion"
+	"github.com/posener/complete"
 )
 
 var Version = "0.1.0"
@@ -32,11 +35,11 @@ type Globals struct {
 	Completion kongcompletion.Completion `cmd:"" help:"Outputs shell code for initialising tab completions" completion-shell-default:"false"`
 }
 
-type ListCmd struct {
+type LsCmd struct {
 	TowerName string `arg:"" optional:"" help:"Name of the tower to list. If not provided, all towers will be listed." predictor:"predictTowers"`
 }
 
-func (l *ListCmd) Run(_ *kong.Context) error {
+func (l *LsCmd) Run(_ *kong.Context) error {
 	// Get the repository path
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
@@ -195,7 +198,7 @@ func (l *ListCmd) Run(_ *kong.Context) error {
 			})
 
 			// Display commits
-			for j := 0; j < len(commits); j++ {
+			for j := range commits {
 				commit := commits[j]
 
 				// Show divergence warning just above the common ancestor
@@ -253,6 +256,57 @@ func findMergeBase(r *git.Repository, commit1, commit2 plumbing.Hash) (plumbing.
 	return mergeBase[0].Hash, nil
 }
 
+// detectDefaultBranch attempts to determine the default branch name for the repository
+func detectDefaultBranch(r *git.Repository) string {
+	// Common default branch names to check in priority order
+	possibleDefaults := []string{"main", "master", "trunk", "development"}
+
+	// First try to get the HEAD reference of the origin remote
+	remotes, err := r.Remotes()
+	if err == nil && len(remotes) > 0 {
+		// Try to find the origin remote
+		var originRemote *git.Remote
+		for _, remote := range remotes {
+			if remote.Config().Name == "origin" {
+				originRemote = remote
+				break
+			}
+		}
+
+		// If we found origin, try to get its HEAD reference
+		if originRemote != nil {
+			// List references from the remote
+			refs, err := r.References()
+			if err == nil {
+				// Look for a HEAD symbolic reference
+				refs.ForEach(func(ref *plumbing.Reference) error {
+					if ref.Name().String() == "refs/remotes/origin/HEAD" {
+						// Extract the branch name from the target
+						target := ref.Target().String()
+						if strings.HasPrefix(target, "refs/remotes/origin/") {
+							branch := strings.TrimPrefix(target, "refs/remotes/origin/")
+							possibleDefaults = []string{branch} // Override with the actual default
+							return fmt.Errorf("stop")
+						}
+					}
+					return nil
+				})
+			}
+		}
+	}
+
+	// Check each possible default branch to see if it exists
+	for _, branchName := range possibleDefaults {
+		branchRef, err := r.Reference(plumbing.NewBranchReferenceName(branchName), true)
+		if err == nil && branchRef != nil {
+			return branchName
+		}
+	}
+
+	// If no default branch was found, return "main" as fallback
+	return "main"
+}
+
 type BranchCmd struct {
 	Add AddCmd `cmd:"add" help:"Add a branch to a tower in current repository"`
 	Rm  RmCmd  `cmd:"rm" help:"Remove a branch from the current tower"`
@@ -293,6 +347,116 @@ func (a *AddCmd) Run(_ *kong.Context) error {
 	// Check if branch already exists in tower
 	if ContainsBranch(tower, a.Name) {
 		return fmt.Errorf("branch '%s' already exists in tower '%s'", a.Name, a.Tower)
+	}
+
+	// Open the repository
+	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
+		DetectDotGit: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	// Verify the branch to add exists
+	addBranchRefName := plumbing.NewBranchReferenceName(a.Name)
+	addBranchRef, err := r.Reference(addBranchRefName, true)
+	if err != nil {
+		return fmt.Errorf("branch '%s' not found in repository", a.Name)
+	}
+
+	// If this is the first branch, prompt for a base branch
+	if len(tower.Branches) == 0 {
+		// Detect default branch
+		defaultBranch := detectDefaultBranch(r)
+
+		// Get all branch names
+		branchLister := BranchLister{}
+		branches := branchLister.Predict(complete.Args{})
+
+		if len(branches) == 0 {
+			return fmt.Errorf("no branches found in repository")
+		}
+
+		// Move default branch to the beginning of the list
+		for i, branch := range branches {
+			if branch == defaultBranch {
+				// Remove default branch from its position
+				branches = slices.Delete(branches, i, i+1)
+				// Insert at the beginning
+				branches = append([]string{defaultBranch}, branches...)
+				break
+			}
+		}
+
+		// Show available branches
+		fmt.Printf("This is the first branch in tower '%s'. Please select a base branch.\n", tower.Name)
+		fmt.Println("Available branches:")
+
+		// Display branches with numbers
+		for i, branch := range branches {
+			if i < 9 {
+				// Highlight the default branch
+				if branch == defaultBranch {
+					fmt.Printf(" %d: %s (default)\n", i+1, branch)
+				} else {
+					fmt.Printf(" %d: %s\n", i+1, branch)
+				}
+			} else if i == 9 {
+				fmt.Printf("%d: %s\n", i+1, branch)
+			} else {
+				fmt.Printf("%d: %s\n", i+1, branch)
+			}
+
+			// Only show up to 20 branches to avoid overwhelming the user
+			if i >= 19 {
+				fmt.Println("... and more")
+				break
+			}
+		}
+
+		// Prompt for selection
+		fmt.Printf("\nEnter branch number or name (default is 1, %s): ", defaultBranch)
+
+		var input string
+		fmt.Scanln(&input)
+
+		var baseBranch string
+
+		// Handle empty input (use default)
+		if input == "" {
+			baseBranch = defaultBranch
+		} else {
+			// Try to interpret input as a number
+			var selection int
+			_, err := fmt.Sscanf(input, "%d", &selection)
+			if err == nil && selection > 0 && selection <= len(branches) && selection <= 20 {
+				// Input was a valid number
+				baseBranch = branches[selection-1]
+			} else {
+				// Input was not a number or out of range, treat as branch name
+				baseBranch = input
+			}
+		}
+
+		// Verify the base branch exists
+		baseBranchRefName := plumbing.NewBranchReferenceName(baseBranch)
+		baseBranchRef, err := r.Reference(baseBranchRefName, true)
+		if err != nil {
+			return fmt.Errorf("base branch '%s' not found in repository", baseBranch)
+		}
+
+		// Find merge base between base branch and branch to add
+		mergeBase, err := findMergeBase(r, addBranchRef.Hash(), baseBranchRef.Hash())
+		if err != nil {
+			// If we can't find merge base, just use the base branch HEAD
+			fmt.Printf("Could not find merge base, using HEAD of %s as tower base\n", baseBranch)
+			tower.Base = baseBranchRef.Hash().String()
+		} else {
+			// Use merge base as tower base
+			tower.Base = mergeBase.String()
+			fmt.Printf("Found merge base between %s and %s, using it as tower base\n", baseBranch, a.Name)
+			fmt.Println("If this is not what you want, you can set the base branch manually using 'ghenga base <commit>'")
+		}
 	}
 
 	// Add branch to tower
@@ -355,7 +519,7 @@ func (r *RmCmd) Run(_ *kong.Context) error {
 	}
 
 	// Remove branch from tower (preserving order)
-	currentTower.Branches = append(currentTower.Branches[:branchIndex], currentTower.Branches[branchIndex+1:]...)
+	currentTower.Branches = slices.Delete(currentTower.Branches, branchIndex, branchIndex+1)
 
 	// Save configuration
 	if err := SaveConfig(config); err != nil {
@@ -435,12 +599,15 @@ func (n *NewCmd) Run(_ *kong.Context) error {
 	// Create tower
 	tower := FindOrCreateTower(repo, n.Name)
 
+	// Set as current tower
+	repo.Current = n.Name
+
 	// Save configuration
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
 
-	fmt.Printf("Created tower '%s' in repository at '%s'\n", tower.Name, repoPath)
+	fmt.Printf("Created tower '%s' in repository at '%s' and set it as the current tower\n", tower.Name, repoPath)
 	return nil
 }
 
@@ -669,7 +836,7 @@ func (r *RmTowerCmd) Run(_ *kong.Context) error {
 	}
 
 	// Remove the tower from the repository
-	repo.Towers = append(repo.Towers[:towerIndex], repo.Towers[towerIndex+1:]...)
+	repo.Towers = slices.Delete(repo.Towers, towerIndex, towerIndex+1)
 
 	// If we removed the current tower, unset current
 	if isCurrent {
@@ -690,7 +857,7 @@ func (r *RmTowerCmd) Run(_ *kong.Context) error {
 }
 
 type RebaseCmd struct {
-	Do   RebaseDoCmd   `cmd:"" help:"Rebase all branches in the current tower that have diverged from their base"`
+	Do   RebaseDoCmd   `cmd:"" default:"1" hidden:"" help:"Rebase all branches in the current tower that have diverged from their base"`
 	Undo RebaseUndoCmd `cmd:"undo" help:"Undo the last rebase operation for the current tower"`
 }
 
@@ -704,9 +871,6 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to check git status: %w", err)
 	}
-
-	fmt.Println("status output:")
-	fmt.Println(string(output))
 
 	if len(strings.TrimSpace(string(output))) > 0 {
 		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before rebasing")
@@ -1111,18 +1275,32 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 	return nil
 }
 
+type ConfigCmd struct {
+}
+
+func (c *ConfigCmd) Run(_ *kong.Context) error {
+	configPath, err := ConfigPath()
+	if err != nil {
+		return fmt.Errorf("failed to get config file path: %w", err)
+	}
+
+	fmt.Println(configPath)
+	return nil
+}
+
 type CLI struct {
 	Globals
 
-	List    ListCmd    `cmd:"" help:"List all towers in current repository"`
-	Branch  BranchCmd  `cmd:"branch" help:"Operate on branches in the current working tower: add, remove, etc."`
+	Ls      LsCmd      `cmd:"" help:"List all towers in current repository"`
+	Branch  BranchCmd  `cmd:"branch" help:"Operate on branches in the current tower: add, rm"`
 	Init    InitCmd    `cmd:"init" help:"Initialize the current repository in ghenga config"`
-	New     NewCmd     `cmd:"new" help:"Create a new tower in current repository"`
+	New     NewCmd     `cmd:"new" help:"Create a new tower in current repository and set it as current"`
 	Current CurrentCmd `cmd:"current" help:"Set the current tower"`
 	Rename  RenameCmd  `cmd:"rename" help:"Rename the current tower"`
 	Base    BaseCmd    `cmd:"base" help:"Set the tower's base commit"`
 	Rm      RmTowerCmd `cmd:"rm" help:"Remove the specified tower"`
-	Rebase  RebaseCmd  `cmd:"rebase" help:"Rebase operations for the current tower"`
+	Rebase  RebaseCmd  `cmd:"rebase" help:"Rebase branches in the current tower (use 'rebase undo' to undo)"`
+	Config  ConfigCmd  `cmd:"config" help:"Print the location of the config file"`
 }
 
 func main() {
@@ -1143,7 +1321,8 @@ func main() {
 		kong.Description("A tool to manage stacked pull requests on Github"),
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{
-			Compact: true,
+			Compact:             true,
+			NoExpandSubcommands: true,
 		}),
 		kong.Vars{
 			"version": Version,

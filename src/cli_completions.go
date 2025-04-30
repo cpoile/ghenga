@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os/exec"
+	"strings"
+
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -93,6 +96,34 @@ func (l TowerBranchLister) Predict(args complete.Args) []string {
 type BranchLister struct{}
 
 func (l BranchLister) Predict(args complete.Args) []string {
+	// Check if git is installed
+	_, err := exec.LookPath("git")
+	if err != nil {
+		// Fall back to unsorted branch listing
+		return fallbackBranchListing()
+	}
+
+	// Use Git's native sort by committer date for local branches
+	cmd := exec.Command("git", "for-each-ref", "--sort=-committerdate", "refs/heads/", "--format=%(refname:short)")
+	output, err := cmd.Output()
+	if err != nil {
+		// Fall back to unsorted branch listing
+		return fallbackBranchListing()
+	}
+
+	// Split output into lines and filter out empty lines
+	branches := []string{}
+	for _, branch := range strings.Split(string(output), "\n") {
+		if branch != "" {
+			branches = append(branches, branch)
+		}
+	}
+
+	return branches
+}
+
+// fallbackBranchListing provides branch listing without sorting if git command fails
+func fallbackBranchListing() []string {
 	// Open the repository
 	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
 		DetectDotGit: true,
