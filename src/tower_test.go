@@ -6,77 +6,20 @@ import (
 	"testing"
 
 	"github.com/alecthomas/kong"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewCommand(t *testing.T) {
-	// Create a temporary directory for the test
-	tempDir, err := os.MkdirTemp("", "ghenga-new-test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
+func TestTower_NewCommand(t *testing.T) {
+	// Setup test environment (handles repo, config, CWD)
+	repoPath, _, cleanup := setupTestEnv(t)
+	defer cleanup()
 
-	// Resolve symlinks in tempDir to get the real path
-	realTempDir, err := filepath.EvalSymlinks(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to resolve symlinks in tempDir: %v", err)
-	}
+	// Resolve symlinks for comparison later if needed (though setupTestEnv might handle this)
+	realRepoPath, err := filepath.EvalSymlinks(repoPath)
+	require.NoError(t, err, "Failed to resolve symlinks")
 
-	// Set up a test git repository
-	repo, err := git.PlainInit(tempDir, false)
-	if err != nil {
-		t.Fatalf("Failed to initialize git repository: %v", err)
-	}
-
-	// Create a temporary file and commit it
-	filePath := filepath.Join(tempDir, "test.txt")
-	if err := os.WriteFile(filePath, []byte("test content"), 0644); err != nil {
-		t.Fatalf("Failed to write test file: %v", err)
-	}
-
-	// Get the worktree
-	wt, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("Failed to get worktree: %v", err)
-	}
-
-	// Add the file to git
-	if _, err := wt.Add("test.txt"); err != nil {
-		t.Fatalf("Failed to add file to git: %v", err)
-	}
-
-	// Create an initial commit
-	_, err = wt.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to commit: %v", err)
-	}
-
-	// Override the config path for testing
-	originalConfigPath := ConfigPath
-	configFilePath := filepath.Join(tempDir, "config.toml")
-	ConfigPath = func() (string, error) {
-		return configFilePath, nil
-	}
-	defer func() { ConfigPath = originalConfigPath }()
-
-	// Change to the temp directory
-	originalDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get current directory: %v", err)
-	}
-	defer os.Chdir(originalDir)
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("Failed to change to temp directory: %v", err)
-	}
+	// Initial config is empty, setupTestEnv handles mock path
 
 	// Create a mock context for running commands
 	mockCtx := &kong.Context{}
@@ -85,124 +28,72 @@ func TestNewCommand(t *testing.T) {
 	newCmd := &NewCmd{
 		Name: "feature-tower",
 	}
-	if err := newCmd.Run(mockCtx); err != nil {
-		t.Fatalf("Failed to run New command: %v", err)
-	}
+	err = newCmd.Run(mockCtx)
+	require.NoError(t, err, "Failed to run New command")
 
 	// Verify the configuration was saved correctly
 	config, err := LoadConfig()
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
+	require.NoError(t, err, "Failed to load config")
 
 	// Verify the repo was added
-	if len(config.Repos) != 1 {
-		t.Errorf("Expected 1 repo, got %d", len(config.Repos))
-	}
+	require.Len(t, config.Repos, 1, "Expected 1 repo")
 
 	repo1 := config.Repos[0]
 	// Compare the real paths to account for symlinks
-	repoPath, err := filepath.EvalSymlinks(repo1.Path)
-	if err != nil {
-		t.Fatalf("Failed to resolve symlinks in repo path: %v", err)
-	}
-	if repoPath != realTempDir {
-		t.Errorf("Expected repo path %s, got %s", realTempDir, repoPath)
-	}
+	configRepoPath, err := filepath.EvalSymlinks(repo1.Path)
+	require.NoError(t, err, "Failed to resolve symlinks in config repo path")
+	assert.Equal(t, realRepoPath, configRepoPath, "Repo path mismatch")
 
 	// Verify the tower was added
-	if len(repo1.Towers) != 1 {
-		t.Errorf("Expected 1 tower, got %d", len(repo1.Towers))
-		for i, tower := range repo1.Towers {
-			t.Logf("Tower %d: %s", i, tower.Name)
-		}
-	}
+	require.Len(t, repo1.Towers, 1, "Expected 1 tower initially")
 
 	// Find and verify the tower
-	var featureTower *Tower
-	for _, tower := range repo1.Towers {
-		if tower.Name == "feature-tower" {
-			featureTower = tower
-		}
-	}
-
-	if featureTower == nil {
-		t.Fatalf("Could not find feature-tower")
-	}
+	featureTower := FindTowerByName(repo1, "feature-tower")
+	require.NotNil(t, featureTower, "Could not find feature-tower")
 
 	// Verify the tower has no branches initially
-	if len(featureTower.Branches) != 0 {
-		t.Errorf("Expected 0 branches in feature-tower, got %d", len(featureTower.Branches))
-	}
+	assert.Empty(t, featureTower.Branches, "Expected 0 branches in feature-tower")
 
 	// Create another tower
 	newCmd2 := &NewCmd{
 		Name: "bugfix-tower",
 	}
-	if err := newCmd2.Run(mockCtx); err != nil {
-		t.Fatalf("Failed to run New command for second tower: %v", err)
-	}
+	err = newCmd2.Run(mockCtx)
+	require.NoError(t, err, "Failed to run New command for second tower")
 
 	// Verify the configuration again
 	config, err = LoadConfig()
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
+	require.NoError(t, err, "Failed to load config")
 
 	// Verify we now have two towers
-	if len(config.Repos[0].Towers) != 2 {
-		t.Errorf("Expected 2 towers, got %d", len(config.Repos[0].Towers))
-	}
+	require.Len(t, config.Repos[0].Towers, 2, "Expected 2 towers")
 
 	// Try to create a duplicate tower (should fail)
 	duplicateCmd := &NewCmd{
 		Name: "feature-tower",
 	}
-	if err := duplicateCmd.Run(mockCtx); err == nil {
-		t.Errorf("Expected error when adding duplicate tower, but got none")
-	}
+	err = duplicateCmd.Run(mockCtx)
+	assert.Error(t, err, "Expected error when adding duplicate tower, but got none")
 }
 
-func TestCurrentCommand(t *testing.T) {
-	// Setup test repository
-	repoPath, _ := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
-
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
+func TestTower_CurrentCommand(t *testing.T) {
+	// Setup test environment
+	repoPath, _, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Initialize config with two towers
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path: repoPath,
-				Towers: []*Tower{
-					{
-						Name:     "tower-1",
-						Branches: []Branch{},
-					},
-					{
-						Name:     "tower-2",
-						Branches: []Branch{},
-					},
-				},
-			},
+	towers := []*Tower{
+		{
+			Name:     "tower-1",
+			Branches: []Branch{},
+		},
+		{
+			Name:     "tower-2",
+			Branches: []Branch{},
 		},
 	}
-	err = SaveConfig(config)
+	config := createTestConfig(t, repoPath, "", towers, "") // Initially no current tower
+	err := SaveConfig(config)
 	require.NoError(t, err)
 
 	// Create a mock context for running commands
@@ -252,7 +143,7 @@ func TestCurrentCommand(t *testing.T) {
 	assert.Equal(t, "tower-1", repo.Current, "Current tower should still be 'tower-1'")
 }
 
-func TestGetCurrentTower(t *testing.T) {
+func TestTower_GetCurrentTower(t *testing.T) {
 	// Create a repo with multiple towers and a current tower set
 	repo := &Repo{
 		Path:    "/test/path",
@@ -296,46 +187,24 @@ func TestGetCurrentTower(t *testing.T) {
 	assert.Nil(t, tower, "GetCurrentTower should return nil when no towers exist")
 }
 
-func TestRenameCommand(t *testing.T) {
-	// Setup test repository
-	repoPath, _ := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
-
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
+func TestTower_RenameCommand(t *testing.T) {
+	// Setup test environment
+	repoPath, _, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Test without a current tower set
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path: repoPath,
-				Towers: []*Tower{
-					{
-						Name:     "tower-1",
-						Branches: []Branch{},
-					},
-					{
-						Name:     "tower-2",
-						Branches: []Branch{},
-					},
-				},
-			},
+	towers := []*Tower{
+		{
+			Name:     "tower-1",
+			Branches: []Branch{},
+		},
+		{
+			Name:     "tower-2",
+			Branches: []Branch{},
 		},
 	}
-	err = SaveConfig(config)
+	config := createTestConfig(t, repoPath, "", towers, "")
+	err := SaveConfig(config)
 	require.NoError(t, err)
 
 	// Create a mock context for running commands
@@ -350,8 +219,10 @@ func TestRenameCommand(t *testing.T) {
 	assert.Contains(t, err.Error(), "no current tower set", "Error should mention that no current tower is set")
 
 	// Now set a current tower
-	config.Repos[0].Current = "tower-1"
-	err = SaveConfig(config)
+	loadedConfig, err := LoadConfig() // Load fresh config
+	require.NoError(t, err)
+	loadedConfig.Repos[0].Current = "tower-1"
+	err = SaveConfig(loadedConfig)
 	require.NoError(t, err)
 
 	// Test renaming the current tower
@@ -397,8 +268,10 @@ func TestRenameCommand(t *testing.T) {
 	assert.Error(t, err, "Expected error when renaming to a name that already exists")
 
 	// Test with a non-existent current tower
-	config.Repos[0].Current = "non-existent-tower"
-	err = SaveConfig(config)
+	loadedConfig, err = LoadConfig() // Load fresh config
+	require.NoError(t, err)
+	loadedConfig.Repos[0].Current = "non-existent-tower"
+	err = SaveConfig(loadedConfig)
 	require.NoError(t, err)
 
 	renameCmd = &RenameCmd{
@@ -409,66 +282,29 @@ func TestRenameCommand(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found", "Error should mention that the current tower was not found")
 }
 
-func TestBaseCommand(t *testing.T) {
-	// Setup test repository
-	repoPath, repo := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+func TestTower_BaseCommand(t *testing.T) {
+	// Setup test environment
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
 	// Create a test commit to use as base
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
 
-	// Create a file
-	filePath := filepath.Join(repoPath, "base-test.txt")
-	err = os.WriteFile(filePath, []byte("base test content"), 0644)
-	require.NoError(t, err)
+	commitHash := addSingleCommit(t, repoPath, wt, "base-test.txt", "base test content", "Base commit for test")
 
-	// Add and commit the file
-	_, err = wt.Add("base-test.txt")
-	require.NoError(t, err)
-
-	commit, err := wt.Commit("Base commit for test", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-		},
-	})
-	require.NoError(t, err)
-
-	// Get the commit as a string
-	baseCommit := commit.String()
-
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
+	// Get the commit hash as a string
+	baseCommit := commitHash.String()
 
 	// Initialize config with a tower and set it as current
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:    repoPath,
-				Current: "test-tower",
-				Towers: []*Tower{
-					{
-						Name:     "test-tower",
-						Branches: []Branch{},
-					},
-				},
-			},
+	towerName := "test-tower"
+	towers := []*Tower{
+		{
+			Name:     towerName,
+			Branches: []Branch{},
 		},
 	}
+	config := createTestConfig(t, repoPath, towerName, towers, "") // Base will be set by the command
 	err = SaveConfig(config)
 	require.NoError(t, err)
 
@@ -490,14 +326,16 @@ func TestBaseCommand(t *testing.T) {
 	repo1 := FindRepoByPath(config, repoPath)
 	require.NotNil(t, repo1, "Repository not found in config")
 
-	tower := FindTowerByName(repo1, "test-tower")
+	tower := FindTowerByName(repo1, towerName)
 	require.NotNil(t, tower, "Tower not found in config")
 
 	assert.Equal(t, baseCommit, tower.Base, "Base commit should be set correctly")
 
 	// Test with no current tower set
-	repo1.Current = ""
-	err = SaveConfig(config)
+	loadedConfig, err := LoadConfig()
+	require.NoError(t, err)
+	loadedConfig.Repos[0].Current = ""
+	err = SaveConfig(loadedConfig)
 	require.NoError(t, err)
 
 	err = baseCmd.Run(mockCtx)
@@ -505,8 +343,10 @@ func TestBaseCommand(t *testing.T) {
 	assert.Contains(t, err.Error(), "no current tower set", "Error should mention that no current tower is set")
 
 	// Test with non-existent commit
-	repo1.Current = "test-tower"
-	err = SaveConfig(config)
+	loadedConfig, err = LoadConfig()
+	require.NoError(t, err)
+	loadedConfig.Repos[0].Current = towerName // Set current back
+	err = SaveConfig(loadedConfig)
 	require.NoError(t, err)
 
 	invalidBaseCmd := &BaseCmd{
@@ -517,56 +357,38 @@ func TestBaseCommand(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to resolve commit", "Error should mention that the commit could not be resolved")
 }
 
-func TestRmTowerCommand(t *testing.T) {
-	// Setup test repository
-	repoPath, _ := setupTestRepo(t)
-	defer os.RemoveAll(repoPath)
+func TestTower_RmTowerCommand(t *testing.T) {
+	// Setup test environment
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
-	// Temporarily change working directory
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	defer os.Chdir(oldWd)
-	os.Chdir(repoPath)
-
-	// Create temporary config file
-	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
-	require.NoError(t, err)
-	defer os.Remove(configFile.Name())
-
-	// Mock the config path
-	oldConfigPath := ConfigPath
-	ConfigPath = mockedConfigPath(configFile.Name())
-	defer func() { ConfigPath = oldConfigPath }()
+	// Create some branches for the towers
+	createTestBranch(t, repo, "branch-1", 1)
+	createTestBranch(t, repo, "branch-2", 1)
+	createTestBranch(t, repo, "branch-3", 1)
 
 	// Initialize config with multiple towers including the current tower
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:    repoPath,
-				Current: "tower-1",
-				Towers: []*Tower{
-					{
-						Name: "tower-1",
-						Branches: []Branch{
-							{Name: "branch-1"},
-							{Name: "branch-2"},
-						},
-					},
-					{
-						Name: "tower-2",
-						Branches: []Branch{
-							{Name: "branch-3"},
-						},
-					},
-					{
-						Name:     "tower-3",
-						Branches: []Branch{},
-					},
-				},
+	towers := []*Tower{
+		{
+			Name: "tower-1",
+			Branches: []Branch{
+				{Name: "branch-1"},
+				{Name: "branch-2"},
 			},
 		},
+		{
+			Name: "tower-2",
+			Branches: []Branch{
+				{Name: "branch-3"},
+			},
+		},
+		{
+			Name:     "tower-3",
+			Branches: []Branch{}, // Keep one empty
+		},
 	}
-	err = SaveConfig(config)
+	config := createTestConfig(t, repoPath, "tower-1", towers, "")
+	err := SaveConfig(config)
 	require.NoError(t, err)
 
 	// Create a mock context for running commands
@@ -605,15 +427,15 @@ func TestRmTowerCommand(t *testing.T) {
 	require.NoError(t, err, "Failed to load config")
 
 	// Verify the tower was removed
-	repo := FindRepoByPath(config, repoPath)
-	require.NotNil(t, repo, "Repository not found in config")
+	repoConfig := FindRepoByPath(config, repoPath)
+	require.NotNil(t, repoConfig, "Repository not found in config")
 
 	// Check that only two towers remain
-	assert.Equal(t, 2, len(repo.Towers), "Expected 2 towers after removal")
+	assert.Equal(t, 2, len(repoConfig.Towers), "Expected 2 towers after removal")
 
 	// Check that the removed tower doesn't exist
 	var foundTower3 bool
-	for _, tower := range repo.Towers {
+	for _, tower := range repoConfig.Towers {
 		if tower.Name == "tower-3" {
 			foundTower3 = true
 			break
@@ -622,7 +444,7 @@ func TestRmTowerCommand(t *testing.T) {
 	assert.False(t, foundTower3, "Tower 'tower-3' should no longer exist")
 
 	// Current tower should still be set
-	assert.Equal(t, "tower-1", repo.Current, "Current tower should still be 'tower-1'")
+	assert.Equal(t, "tower-1", repoConfig.Current, "Current tower should still be 'tower-1'")
 
 	// Test 2: Remove the current tower with confirmation
 	// Mock standard input again with "y" for yes
@@ -656,13 +478,13 @@ func TestRmTowerCommand(t *testing.T) {
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
 
-	repo = FindRepoByPath(config, repoPath)
+	repoConfig = FindRepoByPath(config, repoPath)
 
 	// Only one tower should remain
-	assert.Equal(t, 1, len(repo.Towers), "Expected 1 tower after removing current tower")
+	assert.Equal(t, 1, len(repoConfig.Towers), "Expected 1 tower after removing current tower")
 
 	// Current tower reference should be empty
-	assert.Equal(t, "", repo.Current, "Current tower should be unset after removing it")
+	assert.Equal(t, "", repoConfig.Current, "Current tower should be unset after removing it")
 
 	// Test 3: Try to remove a tower but cancel the operation
 	// Mock standard input with "n" for no
@@ -694,9 +516,9 @@ func TestRmTowerCommand(t *testing.T) {
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
 
-	repo = FindRepoByPath(config, repoPath)
-	assert.Equal(t, 1, len(repo.Towers), "Expected tower to still exist after cancellation")
-	assert.Equal(t, "tower-2", repo.Towers[0].Name, "tower-2 should still exist")
+	repoConfig = FindRepoByPath(config, repoPath)
+	assert.Equal(t, 1, len(repoConfig.Towers), "Expected tower to still exist after cancellation")
+	assert.Equal(t, "tower-2", repoConfig.Towers[0].Name, "tower-2 should still exist")
 
 	// Test 4: Try to remove a non-existent tower
 	rmNonExistentCmd := &RmTowerCmd{
@@ -736,6 +558,6 @@ func TestRmTowerCommand(t *testing.T) {
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
 
-	repo = FindRepoByPath(config, repoPath)
-	assert.Equal(t, 0, len(repo.Towers), "Expected 0 towers after removing the last tower")
+	repoConfig = FindRepoByPath(config, repoPath)
+	assert.Equal(t, 0, len(repoConfig.Towers), "Expected 0 towers after removing the last tower")
 }
