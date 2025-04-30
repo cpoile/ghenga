@@ -1,15 +1,11 @@
 package main
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -350,107 +346,39 @@ func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
 
-	// Step 1: Create the base branch with 3 commits
+	// Step 1: Create the base branch with 3 commits (branches off main/HEAD)
+	createTestBranch(t, repo, "base-branch", 3)
+
+	// Step 2: Create branch-2 (middle-branch) off base branch's HEAD, with 2 commits
+	// Checkout base-branch first
 	err = wt.Checkout(&git.CheckoutOptions{
-		Create: true,
 		Branch: plumbing.NewBranchReferenceName("base-branch"),
 	})
 	require.NoError(t, err)
+	createTestBranch(t, repo, "middle-branch", 2)
 
-	// Add 3 commits to base branch
-	for i := range 3 {
-		filename := fmt.Sprintf("file-base-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
-
-	// Get base branch reference
-	baseRef, err := repo.Reference(plumbing.NewBranchReferenceName("base-branch"), true)
-	require.NoError(t, err)
-
-	// Step 2: Create branch-2 (middle-branch) off base branch's HEAD, with 2 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Hash:   baseRef.Hash(),
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("middle-branch"),
-	})
-	require.NoError(t, err)
-
-	// Add 2 commits to middle branch
-	for i := range 2 {
-		filename := fmt.Sprintf("file-middle-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
-
-	// Get middle branch reference (before adding more commits)
+	// Get middle branch reference (this is the ref *before* the divergent commit)
 	middleRef, err := repo.Reference(plumbing.NewBranchReferenceName("middle-branch"), true)
 	require.NoError(t, err)
 
-	// Step 3: Create branch-3 (top-branch) off branch-2's HEAD, with 3 commits
+	// Step 3: Create branch-3 (top-branch) off the original branch-2's HEAD, with 3 commits
+	// Checkout the specific commit where middle-branch ended before divergence
 	err = wt.Checkout(&git.CheckoutOptions{
-		Hash:   middleRef.Hash(),
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("top-branch"),
+		Hash:   middleRef.Hash(), // Branch off the *original* middle-branch HEAD
+		Create: false,            // Don't create a new branch, just checkout the hash
 	})
 	require.NoError(t, err)
+	// Now create top-branch from this point
+	createTestBranch(t, repo, "top-branch", 3)
 
-	// Add 3 commits to top branch
-	for i := range 3 {
-		filename := fmt.Sprintf("file-top-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
-
-	// Step 4: Checkout branch-2, and create one more commit off branch-2's head
+	// Step 4: Checkout branch-2 again (latest HEAD) to add the divergent commit
 	err = wt.Checkout(&git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName("middle-branch"),
 	})
 	require.NoError(t, err)
 
 	// Add divergent commit to middle branch
-	filePath := filepath.Join(repoPath, "divergent-middle.txt")
-	err = os.WriteFile(filePath, []byte("divergent content"), 0644)
-	require.NoError(t, err)
-	_, err = wt.Add("divergent-middle.txt")
-	require.NoError(t, err)
-	_, err = wt.Commit("Divergent commit on middle branch", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-		},
-	})
-	require.NoError(t, err)
+	addSingleCommit(t, repoPath, wt, "divergent-middle.txt", "divergent content", "Divergent commit on middle branch")
 
 	// Initialize config with one tower and all branches in order
 	towerName := "test-tower"
@@ -506,126 +434,33 @@ func TestLsCmd_TopBranchDivergence(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 1: Create the base branch with 3 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("base-branch"),
-	})
-	require.NoError(t, err)
-
-	// Add 3 commits to base branch
-	for i := range 3 {
-		filename := fmt.Sprintf("file-base-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
-
-	// Get base branch reference
-	baseRef, err := repo.Reference(plumbing.NewBranchReferenceName("base-branch"), true)
-	require.NoError(t, err)
+	createTestBranch(t, repo, "base-branch", 3)
 
 	// Step 2: Create branch-2 (middle-branch) off base branch's HEAD, with 2 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Hash:   baseRef.Hash(),
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("middle-branch"),
-	})
+	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("base-branch")})
 	require.NoError(t, err)
-
-	// Add 2 commits to middle branch
-	for i := range 2 {
-		filename := fmt.Sprintf("file-middle-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
-
-	// Get middle branch reference (before adding more commits)
+	createTestBranch(t, repo, "middle-branch", 2)
 	middleRef, err := repo.Reference(plumbing.NewBranchReferenceName("middle-branch"), true)
 	require.NoError(t, err)
 
 	// Step 3: Create branch-3 (top-branch) off branch-2's HEAD, with 2 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Hash:   middleRef.Hash(),
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("top-branch"),
-	})
+	err = wt.Checkout(&git.CheckoutOptions{Hash: middleRef.Hash()}) // Checkout original middle branch HEAD
 	require.NoError(t, err)
-
-	// Add 2 commits to top branch
-	for i := range 2 {
-		filename := fmt.Sprintf("file-top-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
+	createTestBranch(t, repo, "top-branch", 2)
 
 	// Step 4: Go back to top branch and add another commit (creates divergence)
 	err = wt.Checkout(&git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName("top-branch"),
 	})
 	require.NoError(t, err)
-
-	// Add divergent commit to top branch
-	filePath := filepath.Join(repoPath, "divergent-top.txt")
-	err = os.WriteFile(filePath, []byte("divergent content"), 0644)
-	require.NoError(t, err)
-	_, err = wt.Add("divergent-top.txt")
-	require.NoError(t, err)
-	_, err = wt.Commit("Divergent commit on top branch", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-		},
-	})
-	require.NoError(t, err)
+	addSingleCommit(t, repoPath, wt, "divergent-top.txt", "divergent content", "Divergent commit on top branch")
 
 	// Step 5: Go back to middle branch and add another commit
 	err = wt.Checkout(&git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName("middle-branch"),
 	})
 	require.NoError(t, err)
-
-	// Add another commit to middle branch
-	filePath = filepath.Join(repoPath, "another-middle.txt")
-	err = os.WriteFile(filePath, []byte("another middle content"), 0644)
-	require.NoError(t, err)
-	_, err = wt.Add("another-middle.txt")
-	require.NoError(t, err)
-	_, err = wt.Commit("Another commit on middle branch", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-		},
-	})
-	require.NoError(t, err)
+	addSingleCommit(t, repoPath, wt, "another-middle.txt", "another middle content", "Another commit on middle branch")
 
 	// Initialize config with one tower and all branches in order
 	towerName := "test-tower"
@@ -682,175 +517,47 @@ func TestLsCmd_MultipleDivergences(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 1: Create the base branch with 3 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("base-branch"),
-	})
-	require.NoError(t, err)
-
-	// Add 3 commits to base branch
-	for i := range 3 {
-		filename := fmt.Sprintf("file-base-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
-
-	// Get base branch reference
-	baseRef, err := repo.Reference(plumbing.NewBranchReferenceName("base-branch"), true)
-	require.NoError(t, err)
+	createTestBranch(t, repo, "base-branch", 3)
 
 	// Step 2: Create branch-2 (middle-branch) off base branch's HEAD, with 2 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Hash:   baseRef.Hash(),
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("middle-branch"),
-	})
+	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("base-branch")})
 	require.NoError(t, err)
-
-	// Add 2 commits to middle branch
-	for i := range 2 {
-		filename := fmt.Sprintf("file-middle-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
-
-	// Get middle branch reference (before adding more commits)
+	createTestBranch(t, repo, "middle-branch", 2)
 	middleRef, err := repo.Reference(plumbing.NewBranchReferenceName("middle-branch"), true)
 	require.NoError(t, err)
 
 	// Step 3: Create branch-3 (third-branch) off branch-2's HEAD, with 2 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Hash:   middleRef.Hash(),
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("third-branch"),
-	})
+	err = wt.Checkout(&git.CheckoutOptions{Hash: middleRef.Hash()}) // Checkout original middle branch HEAD
 	require.NoError(t, err)
-
-	// Add 2 commits to third branch
-	for i := range 2 {
-		filename := fmt.Sprintf("file-third-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
-
-	// Get third branch reference before creating top branch
+	createTestBranch(t, repo, "third-branch", 2)
 	thirdRef, err := repo.Reference(plumbing.NewBranchReferenceName("third-branch"), true)
 	require.NoError(t, err)
 
 	// Step 4: Create branch-4 (top-branch) off branch-3's HEAD, with 2 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Hash:   thirdRef.Hash(),
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("top-branch"),
-	})
+	err = wt.Checkout(&git.CheckoutOptions{Hash: thirdRef.Hash()}) // Checkout original third branch HEAD
 	require.NoError(t, err)
-
-	// Add 2 commits to top branch
-	for i := range 2 {
-		filename := fmt.Sprintf("file-top-branch-%d.txt", i)
-		filePath := filepath.Join(repoPath, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		require.NoError(t, err)
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
-	}
+	createTestBranch(t, repo, "top-branch", 2)
 
 	// Step 5: Go back to middle-branch and add one more commit (creates first divergence)
 	err = wt.Checkout(&git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName("middle-branch"),
 	})
 	require.NoError(t, err)
-
-	// Add divergent commit to middle branch
-	filePath := filepath.Join(repoPath, "divergent-middle.txt")
-	err = os.WriteFile(filePath, []byte("divergent middle content"), 0644)
-	require.NoError(t, err)
-	_, err = wt.Add("divergent-middle.txt")
-	require.NoError(t, err)
-	_, err = wt.Commit("Divergent commit on middle branch", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-		},
-	})
-	require.NoError(t, err)
+	addSingleCommit(t, repoPath, wt, "divergent-middle.txt", "divergent middle content", "Divergent commit on middle branch")
 
 	// Step 6: Go back to top-branch and add another commit (creates second divergence)
 	err = wt.Checkout(&git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName("top-branch"),
 	})
 	require.NoError(t, err)
-
-	// Add divergent commit to top branch
-	filePath = filepath.Join(repoPath, "divergent-top.txt")
-	err = os.WriteFile(filePath, []byte("divergent top content"), 0644)
-	require.NoError(t, err)
-	_, err = wt.Add("divergent-top.txt")
-	require.NoError(t, err)
-	_, err = wt.Commit("Divergent commit on top branch", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-		},
-	})
-	require.NoError(t, err)
+	addSingleCommit(t, repoPath, wt, "divergent-top.txt", "divergent top content", "Divergent commit on top branch")
 
 	// Step 7: Go back to third-branch and add another commit (completes second divergence)
 	err = wt.Checkout(&git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName("third-branch"),
 	})
 	require.NoError(t, err)
-
-	// Add another commit to third branch
-	filePath = filepath.Join(repoPath, "another-third.txt")
-	err = os.WriteFile(filePath, []byte("another third content"), 0644)
-	require.NoError(t, err)
-	_, err = wt.Add("another-third.txt")
-	require.NoError(t, err)
-	_, err = wt.Commit("Another commit on third branch", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-		},
-	})
-	require.NoError(t, err)
+	addSingleCommit(t, repoPath, wt, "another-third.txt", "another third content", "Another commit on third branch")
 
 	// Initialize config with one tower and all branches in order
 	towerName := "test-tower"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,8 +9,6 @@ import (
 	"time"
 
 	"slices"
-
-	"errors"
 
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
@@ -204,7 +203,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 					return fmt.Errorf("stop")
 				}
 
-				if count < 10 {
+				if count < 10 { // Limit commits shown per branch
 					commits = append(commits, c)
 					count++
 					return nil

@@ -71,23 +71,12 @@ func createTestBranch(t *testing.T, repo *git.Repository, branchName string, com
 	require.NoError(t, err)
 
 	// Add commits to the branch
-	for i := 0; i < commitCount; i++ {
+	repoPath := wt.Filesystem.Root()
+	for i := range commitCount {
 		filename := fmt.Sprintf("file-%s-%d.txt", branchName, i)
-		filePath := filepath.Join(wt.Filesystem.Root(), filename)
-
-		err = os.WriteFile(filePath, []byte(fmt.Sprintf("Content for %s\n", filename)), 0644)
-		require.NoError(t, err)
-
-		_, err = wt.Add(filename)
-		require.NoError(t, err)
-
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-			},
-		})
-		require.NoError(t, err)
+		content := fmt.Sprintf("Content for %s\n", filename)
+		message := fmt.Sprintf("Add %s", filename)
+		addSingleCommit(t, repoPath, wt, filename, content, message)
 	}
 }
 
@@ -203,4 +192,25 @@ func createTestConfig(t *testing.T, repoPath string, currentTower string, towers
 			},
 		},
 	}
+}
+
+// addSingleCommit adds a single file with specific content and commit message
+// to the current worktree.
+func addSingleCommit(t *testing.T, repoPath string, wt *git.Worktree, filename, content, message string) plumbing.Hash {
+	t.Helper()
+	filePath := filepath.Join(repoPath, filename)
+	err := os.WriteFile(filePath, []byte(content), 0644)
+	require.NoError(t, err, "Failed to write file for commit")
+
+	_, err = wt.Add(filename)
+	require.NoError(t, err, "Failed to add file to staging")
+
+	commitHash, err := wt.Commit(message, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+		},
+	})
+	require.NoError(t, err, "Failed to commit")
+	return commitHash
 }
