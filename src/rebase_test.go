@@ -9,173 +9,97 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRebaseBranchSpecificSave(t *testing.T) {
-	// Setup a test repository
-	tempDir, err := os.MkdirTemp("", "ghenga-test-rebase")
-	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
+	// Setup test environment
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
 
-	// Initialize git repository
-	repo, err := git.PlainInit(tempDir, false)
-	if err != nil {
-		t.Fatalf("Failed to initialize git repository: %v", err)
-	}
-
-	// Create a dummy file and commit it
-	fileName := filepath.Join(tempDir, "file.txt")
-	err = os.WriteFile(fileName, []byte("initial content"), 0644)
-	if err != nil {
-		t.Fatalf("Failed to create file: %v", err)
-	}
-
-	// Get the worktree
+	// Get the worktree and initial commit hash
 	worktree, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("Failed to get worktree: %v", err)
-	}
-
-	// Add the file
-	_, err = worktree.Add("file.txt")
-	if err != nil {
-		t.Fatalf("Failed to add file: %v", err)
-	}
-
-	// Create initial commit
-	initialCommit, err := worktree.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "test",
-			Email: "test@example.com",
-			When:  time.Now(),
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to commit: %v", err)
-	}
+	require.NoError(t, err)
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	initialCommitHash := headRef.Hash()
 
 	// Create some branches with different commits
 	branches := []string{"base-branch", "feature-1", "feature-2"}
 	branchHashes := make(map[string]string)
 
 	for i, branchName := range branches {
-		// Checkout master first to create branches from it
+		// Checkout initial commit first to create branches from it
 		err = worktree.Checkout(&git.CheckoutOptions{
-			Hash: initialCommit,
+			Hash: initialCommitHash,
 		})
-		if err != nil {
-			t.Fatalf("Failed to checkout commit: %v", err)
-		}
+		require.NoError(t, err)
 
 		// Create and checkout the branch
 		err = worktree.Checkout(&git.CheckoutOptions{
 			Branch: plumbing.NewBranchReferenceName(branchName),
 			Create: true,
 		})
-		if err != nil {
-			t.Fatalf("Failed to create branch %s: %v", branchName, err)
-		}
+		require.NoError(t, err)
 
-		// Modify the file and commit
-		err = os.WriteFile(fileName, []byte(branchName+" content "+string(rune('A'+i))), 0644)
-		if err != nil {
-			t.Fatalf("Failed to modify file: %v", err)
-		}
-		_, err = worktree.Add("file.txt")
-		if err != nil {
-			t.Fatalf("Failed to add file: %v", err)
-		}
-		commit, err := worktree.Commit("Commit on "+branchName, &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "test",
-				Email: "test@example.com",
-				When:  time.Now(),
-			},
-		})
-		if err != nil {
-			t.Fatalf("Failed to commit: %v", err)
-		}
+		// Add a unique commit to this branch
+		filename := "file.txt" // Overwrite the same file for simplicity
+		content := fmt.Sprintf("%s content %c", branchName, 'A'+i)
+		message := fmt.Sprintf("Commit on %s", branchName)
+		commitHash := addSingleCommit(t, repoPath, worktree, filename, content, message)
 
 		// Store the branch hash
-		branchHashes[branchName] = commit.String()
-	}
-
-	// Create mock config for testing
-	oldConfigPath := ConfigPath
-	defer func() { ConfigPath = oldConfigPath }()
-
-	configFile := filepath.Join(tempDir, "config.toml")
-	ConfigPath = func() (string, error) {
-		return configFile, nil
+		branchHashes[branchName] = commitHash.String()
 	}
 
 	// Create a tower with the branches
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:    tempDir,
-				Current: "test-tower",
-				Towers: []*Tower{
-					{
-						Name: "test-tower",
-						Branches: []Branch{
-							{Name: branches[0]},
-							{Name: branches[1]},
-							{Name: branches[2]},
-						},
-					},
-				},
-			},
+	towerName := "test-tower"
+	towerBranches := make([]Branch, len(branches))
+	for i, name := range branches {
+		towerBranches[i] = Branch{Name: name}
+	}
+	towers := []*Tower{
+		{
+			Name:     towerName,
+			Branches: towerBranches,
 		},
 	}
+	config := createTestConfig(t, repoPath, towerName, towers, "") // No explicit base needed for this test
 
-	// Save the config
+	// Save the config (handled by setupTestEnv initially, need to save changes)
 	err = SaveConfig(config)
-	if err != nil {
-		t.Fatalf("Failed to save config: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Test the reflog saving functionality
-	// In a real test, we'd mock the git commands to avoid actual execution
-	// Here we can just verify that the data structures would be updated correctly
+	// (The test logic manipulates the loaded config directly)
 
 	// Load the config
-	config, err = LoadConfig()
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
+	loadedConfig, err := LoadConfig()
+	require.NoError(t, err)
 
 	// Get the tower from config
-	tower := FindTowerByName(config.Repos[0], "test-tower")
-	assert.NotNil(t, tower, "Tower should exist in config")
+	tower := FindTowerByName(loadedConfig.Repos[0], towerName)
+	require.NotNil(t, tower, "Tower should exist in config")
 
-	// Simulate the RebaseDoCmd.Run() storing reflog IDs
+	// Simulate storing reflog IDs (using the commit hashes we created)
 	tower.LastRebased = time.Now().Format(time.RFC3339)
 	for i := range tower.Branches {
 		branch := &tower.Branches[i]
-		// In real implementation this would be from git, here we use our stored hashes
 		branch.LastReflogID = branchHashes[branch.Name]
 	}
 
-	// Save the config
-	err = SaveConfig(config)
-	if err != nil {
-		t.Fatalf("Failed to save config: %v", err)
-	}
+	// Save the config with simulated reflog IDs
+	err = SaveConfig(loadedConfig)
+	require.NoError(t, err)
 
 	// Load the config again
 	updatedConfig, err := LoadConfig()
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Check that the reflog IDs were saved correctly
-	updatedTower := FindTowerByName(updatedConfig.Repos[0], "test-tower")
-	assert.NotNil(t, updatedTower, "Tower should exist in config")
+	updatedTower := FindTowerByName(updatedConfig.Repos[0], towerName)
+	require.NotNil(t, updatedTower, "Tower should exist in config")
 	assert.NotEmpty(t, updatedTower.LastRebased, "Last rebased timestamp should be set")
 
 	for _, branch := range updatedTower.Branches {
@@ -183,30 +107,23 @@ func TestRebaseBranchSpecificSave(t *testing.T) {
 			"Branch %s should have correct LastReflogID", branch.Name)
 	}
 
-	// Test that RebaseUndoCmd would process these correctly
-	// Here we'd simulate the undo by clearing the reflog IDs
-
-	// Clear the reflog IDs
+	// Simulate the undo by clearing the reflog IDs in the config
 	for i := range updatedTower.Branches {
 		branch := &updatedTower.Branches[i]
 		branch.LastReflogID = ""
 	}
 	updatedTower.LastRebased = ""
 
-	// Save the config
+	// Save the config with cleared IDs
 	err = SaveConfig(updatedConfig)
-	if err != nil {
-		t.Fatalf("Failed to save config: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Verify they were cleared
 	finalConfig, err := LoadConfig()
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
+	require.NoError(t, err)
 
-	finalTower := FindTowerByName(finalConfig.Repos[0], "test-tower")
-	assert.NotNil(t, finalTower, "Tower should exist in config")
+	finalTower := FindTowerByName(finalConfig.Repos[0], towerName)
+	require.NotNil(t, finalTower, "Tower should exist in config")
 	assert.Empty(t, finalTower.LastRebased, "Last rebased timestamp should be cleared")
 
 	for _, branch := range finalTower.Branches {
@@ -216,246 +133,78 @@ func TestRebaseBranchSpecificSave(t *testing.T) {
 }
 
 func TestRebaseAndUndoWithActualRepo(t *testing.T) {
-	// Setup test repository
-	tempDir, err := os.MkdirTemp("", "ghenga-test-rebase-actual")
-	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
-	}
+	// Setup test repository (using basic helper, not full env setup)
+	tempDir, repo := setupTestRepo(t) // Use tempDir as repoPath
 	defer os.RemoveAll(tempDir)
 
-	// Initialize git repository
-	repo, err := git.PlainInit(tempDir, false)
-	if err != nil {
-		t.Fatalf("Failed to initialize git repository: %v", err)
-	}
-
-	// Get the worktree
+	// Get the worktree and initial commit
 	wt, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("Failed to get worktree: %v", err)
-	}
-
-	// Create an initial commit
-	initialFilePath := filepath.Join(tempDir, "initial.txt")
-	err = os.WriteFile(initialFilePath, []byte("initial content"), 0644)
-	if err != nil {
-		t.Fatalf("Failed to create initial file: %v", err)
-	}
-	_, err = wt.Add("initial.txt")
-	if err != nil {
-		t.Fatalf("Failed to add initial file: %v", err)
-	}
-	initialCommit, err := wt.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-			When:  time.Now(),
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create initial commit: %v", err)
-	}
+	require.NoError(t, err)
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	initialCommitHash := headRef.Hash()
 
 	// Step 1: Create the base branch with 3 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("base-branch"),
-	})
-	if err != nil {
-		t.Fatalf("Failed to create base branch: %v", err)
-	}
-
-	// Add 3 commits to base branch
-	for i := range 3 {
-		filename := fmt.Sprintf("file-base-branch-%d.txt", i)
-		filePath := filepath.Join(tempDir, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		if err != nil {
-			t.Fatalf("Failed to write to file: %v", err)
-		}
-		_, err = wt.Add(filename)
-		if err != nil {
-			t.Fatalf("Failed to add file: %v", err)
-		}
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-				When:  time.Now(),
-			},
-		})
-		if err != nil {
-			t.Fatalf("Failed to commit: %v", err)
-		}
-	}
-
-	// Get base branch reference
-	baseRef, err := repo.Reference(plumbing.NewBranchReferenceName("base-branch"), true)
-	if err != nil {
-		t.Fatalf("Failed to get base branch reference: %v", err)
-	}
+	createTestBranch(t, repo, "base-branch", 3)
 
 	// Step 2: Create middle-branch from base branch's HEAD, with 2 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Hash:   baseRef.Hash(),
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("middle-branch"),
-	})
-	if err != nil {
-		t.Fatalf("Failed to create middle branch: %v", err)
-	}
-
-	// Add 2 commits to middle branch
-	for i := range 2 {
-		filename := fmt.Sprintf("file-middle-branch-%d.txt", i)
-		filePath := filepath.Join(tempDir, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		if err != nil {
-			t.Fatalf("Failed to write to file: %v", err)
-		}
-		_, err = wt.Add(filename)
-		if err != nil {
-			t.Fatalf("Failed to add file: %v", err)
-		}
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-				When:  time.Now(),
-			},
-		})
-		if err != nil {
-			t.Fatalf("Failed to commit: %v", err)
-		}
-	}
-
-	// Get middle branch reference
+	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("base-branch")})
+	require.NoError(t, err)
+	createTestBranch(t, repo, "middle-branch", 2)
 	middleRef, err := repo.Reference(plumbing.NewBranchReferenceName("middle-branch"), true)
-	if err != nil {
-		t.Fatalf("Failed to get middle branch reference: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Step 3: Create top-branch from middle branch's HEAD, with 2 commits
-	err = wt.Checkout(&git.CheckoutOptions{
-		Hash:   middleRef.Hash(),
-		Create: true,
-		Branch: plumbing.NewBranchReferenceName("top-branch"),
-	})
-	if err != nil {
-		t.Fatalf("Failed to create top branch: %v", err)
-	}
-
-	// Add 2 commits to top branch
-
-	for i := range 2 {
-		filename := fmt.Sprintf("file-top-branch-%d.txt", i)
-		filePath := filepath.Join(tempDir, filename)
-		err = os.WriteFile(filePath, fmt.Appendf(nil, "content %d", i), 0644)
-		if err != nil {
-			t.Fatalf("Failed to write to file: %v", err)
-		}
-		_, err = wt.Add(filename)
-		if err != nil {
-			t.Fatalf("Failed to add file: %v", err)
-		}
-		_, err = wt.Commit(fmt.Sprintf("Add %s", filename), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-				When:  time.Now(),
-			},
-		})
-		if err != nil {
-			t.Fatalf("Failed to commit: %v", err)
-		}
-	}
+	err = wt.Checkout(&git.CheckoutOptions{Hash: middleRef.Hash()})
+	require.NoError(t, err)
+	createTestBranch(t, repo, "top-branch", 2)
 
 	// Step 4: Go back to base-branch and add one more commit (creates divergence)
 	err = wt.Checkout(&git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName("base-branch"),
 	})
-	if err != nil {
-		t.Fatalf("Failed to checkout base branch: %v", err)
-	}
+	require.NoError(t, err)
+	addSingleCommit(t, tempDir, wt, "divergent-base.txt", "divergent base content", "Divergent commit on base branch")
 
-	// Add divergent commit to base branch
-	divergentBasePath := filepath.Join(tempDir, "divergent-base.txt")
-	err = os.WriteFile(divergentBasePath, []byte("divergent base content"), 0644)
-	if err != nil {
-		t.Fatalf("Failed to write to divergent file: %v", err)
-	}
-	_, err = wt.Add("divergent-base.txt")
-	if err != nil {
-		t.Fatalf("Failed to add divergent file: %v", err)
-	}
-	_, err = wt.Commit("Divergent commit on base branch", &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-			When:  time.Now(),
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to commit divergent change: %v", err)
-	}
-
-	// Temporarily change working directory
+	// Temporarily change working directory for config setup
 	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to get current working directory: %v", err)
-	}
+	require.NoError(t, err)
 	defer os.Chdir(oldWd)
 
-	// create a new temp directory for config file
+	// Create a separate temp directory for the config file
 	configTempDir, err := os.MkdirTemp("", "ghenga-test-rebase-actual-config")
-	if err != nil {
-		t.Fatalf("Failed to create temp directory: %v", err)
-	}
+	require.NoError(t, err)
 	defer os.RemoveAll(configTempDir)
 
-	err = os.Chdir(configTempDir)
-	if err != nil {
-		t.Fatalf("Failed to change working directory: %v", err)
-	}
+	err = os.Chdir(configTempDir) // Change CWD to config dir temporarily
+	require.NoError(t, err)
 
-	// Create mock config file
+	// Mock ConfigPath to point to the file in configTempDir
 	configFile := filepath.Join(configTempDir, "config.toml")
 	oldConfigPath := ConfigPath
 	defer func() { ConfigPath = oldConfigPath }()
-	ConfigPath = func() (string, error) {
-		return configFile, nil
-	}
+	ConfigPath = mockedConfigPath(configFile)
 
 	// Initialize config with one tower and all branches in order
-	config := &Config{
-		Repos: []*Repo{
-			{
-				Path:    tempDir,
-				Current: "test-tower",
-				Towers: []*Tower{
-					{
-						Name: "test-tower",
-						Base: initialCommit.String(),
-						Branches: []Branch{
-							{Name: "base-branch"},
-							{Name: "middle-branch"},
-							{Name: "top-branch"},
-						},
-					},
-				},
+	towerName := "test-tower"
+	towers := []*Tower{
+		{
+			Name: towerName,
+			// Base and Branches are set via createTestConfig
+			Branches: []Branch{
+				{Name: "base-branch"},
+				{Name: "middle-branch"},
+				{Name: "top-branch"},
 			},
 		},
 	}
+	config := createTestConfig(t, tempDir, towerName, towers, initialCommitHash.String())
 	err = SaveConfig(config)
-	if err != nil {
-		t.Fatalf("Failed to save config: %v", err)
-	}
+	require.NoError(t, err)
 
-	// change back to the temp directory
+	// Change CWD back to the repo directory for commands
 	err = os.Chdir(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to change working directory: %v", err)
-	}
+	require.NoError(t, err)
 
 	// 1. Create functions to capture command output
 	captureListOutput := func() string {
