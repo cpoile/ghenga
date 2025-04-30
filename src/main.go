@@ -9,6 +9,8 @@ import (
 
 	"slices"
 
+	"errors"
+
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
 	"github.com/go-git/go-git/v5"
@@ -79,6 +81,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 	commitColor := color.New(color.FgWhite)
 	baseCommitColor := color.New(color.FgCyan)
 	divergedColor := color.New(color.FgRed).Add(color.Bold)
+	warningColor := color.New(color.FgYellow).Add(color.Bold)
 
 	// Filter towers based on TowerName
 	var towers []*Tower
@@ -107,6 +110,18 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 		}
 
 		fmt.Println()
+
+		// Check if the tower base branch exists
+		if len(tower.Branches) > 0 {
+			baseBranchName := tower.Branches[0].Name
+			baseBranchRefName := plumbing.NewBranchReferenceName(baseBranchName)
+			_, err := r.Reference(baseBranchRefName, true)
+			if err != nil && errors.Is(err, plumbing.ErrReferenceNotFound) {
+				warningColor.Println("  ⚠️ Warning: The base branch is no longer valid -- if it has been merged,")
+				warningColor.Println("           you need to run 'ghenga land' to mark the base branch as merged.")
+				warningColor.Println("           The rest of the tower will then be rebased.")
+			}
+		}
 
 		// Store branch hashes for limiting commit display
 		branchHashes := make(map[int]plumbing.Hash)

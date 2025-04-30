@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestListCmd_NoTowers(t *testing.T) {
+func TestLsCmd_NoTowers(t *testing.T) {
 	// Setup test repository
 	repoPath, _ := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -59,7 +59,7 @@ func TestListCmd_NoTowers(t *testing.T) {
 	assert.NotContains(t, output, "Tower:")
 }
 
-func TestListCmd_OneTowerNoRepositories(t *testing.T) {
+func TestLsCmd_OneTowerNoRepositories(t *testing.T) {
 	// Setup test repository
 	repoPath, _ := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -109,7 +109,7 @@ func TestListCmd_OneTowerNoRepositories(t *testing.T) {
 	assert.NotContains(t, output, "Initial commit")
 }
 
-func TestListCmd_OneTowerOneBranchNoCommits(t *testing.T) {
+func TestLsCmd_OneTowerOneBranchNoCommits(t *testing.T) {
 	// Setup test repository
 	repoPath, repo := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -170,7 +170,7 @@ func TestListCmd_OneTowerOneBranchNoCommits(t *testing.T) {
 	assert.Contains(t, output, "Initial commit")
 }
 
-func TestListCmd_OneTowerOneBranchWithCommits(t *testing.T) {
+func TestLsCmd_OneTowerOneBranchWithCommits(t *testing.T) {
 	// Setup test repository
 	repoPath, repo := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -236,7 +236,7 @@ func TestListCmd_OneTowerOneBranchWithCommits(t *testing.T) {
 	assert.True(t, pos1 < pos0, "Commits should be in reverse chronological order")
 }
 
-func TestListCmd_MultipleTowersMultipleBranches(t *testing.T) {
+func TestLsCmd_MultipleTowersMultipleBranches(t *testing.T) {
 	// Setup test repository
 	repoPath, repo := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -328,7 +328,7 @@ func TestListCmd_MultipleTowersMultipleBranches(t *testing.T) {
 	assert.True(t, f2Pos1 < f2Pos0, "Commits should be in reverse chronological order")
 }
 
-func TestListCmd_FilterByTowerName(t *testing.T) {
+func TestLsCmd_FilterByTowerName(t *testing.T) {
 	// Setup test repository
 	repoPath, repo := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -394,7 +394,7 @@ func TestListCmd_FilterByTowerName(t *testing.T) {
 	assert.Contains(t, output, "Add file-feature-1-1.txt")
 }
 
-func TestListCmd_StaggeredCommitView(t *testing.T) {
+func TestLsCmd_StaggeredCommitView(t *testing.T) {
 	// Setup test repository
 	repoPath, repo := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -544,7 +544,7 @@ func TestListCmd_StaggeredCommitView(t *testing.T) {
 	assert.NotContains(t, outputNoBase, "(base)", "Output should not contain base marker when no base is set")
 }
 
-func TestListCmd_MiddleBranchDivergence(t *testing.T) {
+func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 	// Setup test repository
 	repoPath, repo := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -729,7 +729,7 @@ func TestListCmd_MiddleBranchDivergence(t *testing.T) {
 	assert.Contains(t, output, "Divergent commit on middle branch", "Divergent commit should be shown")
 }
 
-func TestListCmd_TopBranchDivergence(t *testing.T) {
+func TestLsCmd_TopBranchDivergence(t *testing.T) {
 	// Setup test repository
 	repoPath, repo := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -935,7 +935,7 @@ func TestListCmd_TopBranchDivergence(t *testing.T) {
 	assert.Contains(t, output, "Another commit on middle branch", "Middle branch additional commit should be shown")
 }
 
-func TestListCmd_MultipleDivergences(t *testing.T) {
+func TestLsCmd_MultipleDivergences(t *testing.T) {
 	// Setup test repository
 	repoPath, repo := setupTestRepo(t)
 	defer os.RemoveAll(repoPath)
@@ -1199,4 +1199,67 @@ func TestListCmd_MultipleDivergences(t *testing.T) {
 		"First divergence warning should be in top branch section")
 	assert.True(t, thirdPos < secondWarningPos && secondWarningPos < middlePos,
 		"Second divergence warning should be in middle branch section")
+}
+
+func TestLsCmd_BaseBranchMissingWarning(t *testing.T) {
+	// Setup test repository
+	repoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(repoPath)
+
+	// Create branches
+	baseBranchName := "base-branch"
+	featureBranchName := "feature-branch"
+	createTestBranch(t, repo, baseBranchName, 1)
+	createTestBranch(t, repo, featureBranchName, 1)
+
+	// Temporarily change working directory
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	os.Chdir(repoPath)
+
+	// Create temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	defer os.Remove(configFile.Name())
+
+	// Mock the config path
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFile.Name())
+	defer func() { ConfigPath = oldConfigPath }()
+
+	// Initialize config with the tower
+	config := &Config{
+		Repos: []*Repo{
+			{
+				Path:    repoPath,
+				Current: "test-tower",
+				Towers: []*Tower{
+					{
+						Name: "test-tower",
+						Branches: []Branch{
+							{Name: baseBranchName},
+							{Name: featureBranchName},
+						},
+					},
+				},
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Delete the base branch from the git repository
+	err = repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(baseBranchName))
+	require.NoError(t, err)
+
+	// Run the list command
+	cmd := &LsCmd{}
+	output, err := CaptureOutput(func() error {
+		return cmd.Run(nil)
+	})
+	require.NoError(t, err)
+
+	// Verify output contains the warning
+	assert.Contains(t, output, "⚠️ Warning: The base branch is no longer valid")
 }
