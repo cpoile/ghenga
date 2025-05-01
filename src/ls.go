@@ -105,7 +105,6 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 				// Resolve the first branch of the tower
 				firstTowerBranch := tower.Branches[0]
 				firstTowerBranchRef, errFirst := r.Reference(plumbing.NewBranchReferenceName(firstTowerBranch.Name), true)
-				fmt.Printf("bottomBranch: %s, bottomBranchRef: %s, baseBranch: %s, baseBranchRef: %s\n", firstTowerBranch, firstTowerBranchRef, tower.Base, baseBranchRef)
 				if errFirst != nil {
 					warningColor.Printf("  ⚠️ Could not resolve first tower branch '%s': %v\n", firstTowerBranch.Name, errFirst)
 					baseCalculationFailed = true
@@ -116,7 +115,6 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 						warningColor.Printf("  ⚠️ Could not find merge base between '%s' and '%s': %v\n", firstTowerBranch.Name, tower.Base, errMerge)
 						baseCalculationFailed = true
 					} else {
-						fmt.Printf("mergeBaseHash: %s\n", mergeBaseHash)
 						calculatedBaseCommit = mergeBaseHash
 					}
 				}
