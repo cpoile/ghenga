@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -93,7 +94,7 @@ func (r *RenameCmd) Run(_ *kong.Context) error {
 }
 
 type BaseCmd struct {
-	Commit string `arg:"" help:"Commit hash or reference to set as the tower's base" predictor:"predictGitRefs"`
+	BaseBranch string `arg:"" help:"Branch name to set as the tower's base" predictor:"predictGitRefs"`
 }
 
 func (b *BaseCmd) Run(_ *kong.Context) error {
@@ -107,18 +108,32 @@ func (b *BaseCmd) Run(_ *kong.Context) error {
 		return err
 	}
 
-	hash, err := r.ResolveRevision(plumbing.Revision(b.Commit))
+	// Validate that the branch exists
+	refName := plumbing.NewBranchReferenceName(b.BaseBranch)
+	_, err = r.Reference(refName, true) // 'true' resolves symbolic refs like HEAD
 	if err != nil {
-		return fmt.Errorf("failed to resolve commit '%s': %w", b.Commit, err)
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			// Also check remote refs just in case it's not local yet
+			remoteRefName := plumbing.NewRemoteReferenceName("origin", b.BaseBranch) // Assuming "origin"
+			_, errRem := r.Reference(remoteRefName, true)
+			if errors.Is(errRem, plumbing.ErrReferenceNotFound) {
+				return fmt.Errorf("branch '%s' not found locally or on origin", b.BaseBranch)
+			} else if errRem != nil {
+				return fmt.Errorf("failed to check remote branch '%s': %w", b.BaseBranch, errRem)
+			}
+			// If remote exists but local doesn't, it's still valid to set as base
+		} else {
+			return fmt.Errorf("failed to validate base branch '%s': %w", b.BaseBranch, err)
+		}
 	}
 
-	currentTower.Base = hash.String()
+	currentTower.Base = b.BaseBranch // Store the branch name
 
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
 
-	fmt.Printf("Set base commit for tower '%s' to '%s' in repository at '%s'\n", currentTower.Name, currentTower.Base, repoPath)
+	fmt.Printf("Set base branch for tower '%s' to '%s' in repository at '%s'\n", currentTower.Name, currentTower.Base, repoPath)
 	return nil
 }
 

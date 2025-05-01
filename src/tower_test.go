@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/alecthomas/kong"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -314,7 +315,7 @@ func TestTower_BaseCommand(t *testing.T) {
 
 	// Test setting base commit
 	baseCmd := &BaseCmd{
-		Commit: baseCommit,
+		BaseBranch: "main",
 	}
 	repoConfig, err := runTowerCommandAndGetRepo(t, baseCmd, mockCtx, repoPath)
 	require.NoError(t, err, "Failed to run Base command")
@@ -322,7 +323,9 @@ func TestTower_BaseCommand(t *testing.T) {
 	// Verify the base commit was set
 	tower := findTowerByName(repoConfig, towerName)
 	require.NotNil(t, tower, "Tower not found in config")
-	assert.Equal(t, baseCommit, tower.Base, "Base commit should be set correctly")
+	towerBaseHash, err := repo.ResolveRevision(plumbing.Revision(tower.Base))
+	assert.NoError(t, err)
+	assert.Equal(t, baseCommit, towerBaseHash.String(), "Base commit should be set correctly")
 
 	// Test with no current tower set
 	loadedConfig, err := LoadConfig()
@@ -343,11 +346,11 @@ func TestTower_BaseCommand(t *testing.T) {
 	require.NoError(t, err)
 
 	invalidBaseCmd := &BaseCmd{
-		Commit: "nonexistentcommit",
+		BaseBranch: "nonexistent-branch",
 	}
 	_, err = runTowerCommandAndGetRepo(t, invalidBaseCmd, mockCtx, repoPath)
 	assert.Error(t, err, "Base should fail with non-existent commit")
-	assert.Contains(t, err.Error(), "failed to resolve commit", "Error should mention that the commit could not be resolved")
+	assert.Contains(t, err.Error(), "branch 'nonexistent-branch' not found locally or on origin", "Error should mention that the commit could not be resolved")
 }
 
 func TestTower_RmTowerCommand(t *testing.T) {

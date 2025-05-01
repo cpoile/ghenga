@@ -69,28 +69,60 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 		}
 
 		if tower.Base != "" {
-			baseCommitColor.Printf(" [base: %s]", tower.Base[:7])
+			baseCommitColor.Printf(" [base: %s]", tower.Base)
+		} else {
+			warningColor.Printf(" ⚠️ warning: base not set")
 		}
 
 		fmt.Println()
 
+		// TODO: need to rename "base branch" to something else, confusing with "base"
 		// Check if the tower base branch exists
 		if len(tower.Branches) > 0 {
 			baseBranchName := tower.Branches[0].Name
 			baseBranchRefName := plumbing.NewBranchReferenceName(baseBranchName)
 			_, err := r.Reference(baseBranchRefName, true)
 			if err != nil && errors.Is(err, plumbing.ErrReferenceNotFound) {
-				warningColor.Println("  ⚠️ Warning: The base branch is no longer valid -- if it has been merged,")
+				warningColor.Println("  ⚠️ Warning: The base branch is no longer valid -- if it has been merged upstream,")
 				warningColor.Println("           you need to run 'ghenga land' to mark the base branch as merged.")
 				warningColor.Println("           The rest of the tower will then be rebased.")
 			}
 		}
 
-		// Store branch hashes for limiting commit display
-		branchHashes := make(map[int]plumbing.Hash)
-
 		// Track divergence points for highlighting
 		divergencePoints := make(map[string]bool)
+
+		// Determine the actual base commit hash based on merge-base if applicable
+		var calculatedBaseCommit plumbing.Hash
+		baseCalculationFailed := false
+		if tower.Base != "" && len(tower.Branches) > 0 {
+			// Resolve the configured base branch
+			baseBranchRef, errBase := r.ResolveRevision(plumbing.Revision(tower.Base))
+			if errBase != nil {
+				warningColor.Printf("  ⚠️ Could not resolve base branch '%s': %v\n", tower.Base, errBase)
+				baseCalculationFailed = true
+			} else {
+				// Resolve the first branch of the tower
+				firstTowerBranch := tower.Branches[0]
+				firstTowerBranchRef, errFirst := r.Reference(plumbing.NewBranchReferenceName(firstTowerBranch.Name), true)
+				if errFirst != nil {
+					warningColor.Printf("  ⚠️ Could not resolve first tower branch '%s': %v\n", firstTowerBranch.Name, errFirst)
+					baseCalculationFailed = true
+				} else {
+					// Find the merge base
+					mergeBaseHash, errMerge := findMergeBase(r, firstTowerBranchRef.Hash(), *baseBranchRef)
+					if errMerge != nil {
+						warningColor.Printf("  ⚠️ Could not find merge base between '%s' and '%s': %v\n", firstTowerBranch.Name, tower.Base, errMerge)
+						baseCalculationFailed = true
+					} else {
+						calculatedBaseCommit = mergeBaseHash
+					}
+				}
+			}
+		}
+
+		// Store branch hashes for limiting commit display
+		branchHashes := make(map[int]plumbing.Hash)
 
 		// First pass: collect branch hashes
 		for i, branch := range tower.Branches {
@@ -184,9 +216,9 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 			var commits []*object.Commit
 			count := 0
 			commitIter.ForEach(func(c *object.Commit) error {
-				// For the base branch (i==0), stop at the tower base commit
-				if i == 0 && tower.Base != "" && c.Hash.String() == tower.Base {
-					commits = append(commits, c)
+				// For the base branch (i==0), stop at the calculated merge base
+				if i == 0 && !calculatedBaseCommit.IsZero() && c.Hash == calculatedBaseCommit {
+					commits = append(commits, c) // Include the merge-base commit itself
 					return fmt.Errorf("stop")
 				}
 
@@ -215,15 +247,20 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 
 				message := strings.Split(commit.Message, "\n")[0]
 
-				// Check if this is the base commit or a divergence point
-				if i == 0 && tower.Base != "" && commit.Hash.String() == tower.Base {
-					baseCommitColor.Printf("    %s %s (base)\n", commit.Hash.String()[:7], message)
+				// Check if this is the calculated base commit or a divergence point
+				if i == 0 && !calculatedBaseCommit.IsZero() && commit.Hash == calculatedBaseCommit {
+					baseCommitColor.Printf("    %s %s (merge-base with %s)\n", commit.Hash.String()[:7], message, tower.Base)
 				} else if divergencePoints[commit.Hash.String()] {
 					// TODO: test this
 					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
 				} else {
 					commitColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
 				}
+			}
+
+			// If base calculation failed, print a warning after the commits for the base branch
+			if i == 0 && baseCalculationFailed {
+				warningColor.Println("    ⚠️ Could not determine the precise base commit history due to errors above.")
 			}
 		}
 		fmt.Println()

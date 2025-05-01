@@ -18,7 +18,7 @@ func TestRebaseBranchSpecificSave(t *testing.T) {
 	repoPath, repo, cleanup := setupTestEnv(t)
 	defer cleanup()
 
-	// Get the worktree and initial commit hash
+	// Get the worktree and initial commit
 	worktree, err := repo.Worktree()
 	require.NoError(t, err)
 	headRef, err := repo.Head()
@@ -65,7 +65,7 @@ func TestRebaseBranchSpecificSave(t *testing.T) {
 			Branches: towerBranches,
 		},
 	}
-	config := createTestConfig(t, repoPath, towerName, towers, "") // No explicit base needed for this test
+	config := createTestConfig(t, repoPath, towerName, towers, "main")
 
 	// Save the config (handled by setupTestEnv initially, need to save changes)
 	err = SaveConfig(config)
@@ -137,12 +137,11 @@ func TestRebaseAndUndoWithActualRepo(t *testing.T) {
 	tempDir, repo := setupTestRepo(t) // Use tempDir as repoPath
 	defer os.RemoveAll(tempDir)
 
-	// Get the worktree and initial commit
+	// Get the worktree (initial commit hash not needed directly here)
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
-	headRef, err := repo.Head()
+	_, err = repo.Head() // Ensure repo head is read okay
 	require.NoError(t, err)
-	initialCommitHash := headRef.Hash()
 
 	// Step 1: Create the base branch with 3 commits
 	createTestBranch(t, repo, "base-branch", 3)
@@ -198,7 +197,7 @@ func TestRebaseAndUndoWithActualRepo(t *testing.T) {
 			},
 		},
 	}
-	config := createTestConfig(t, tempDir, towerName, towers, initialCommitHash.String())
+	config := createTestConfig(t, tempDir, towerName, towers, "main")
 	err = SaveConfig(config)
 	require.NoError(t, err)
 
@@ -279,16 +278,15 @@ func TestRebaseAndUndoWithActualRepo(t *testing.T) {
 }
 
 func TestRebaseUndoRecreatesDeletedBranch(t *testing.T) {
-	// Setup test repository
-	tempDir, repo := setupTestRepo(t) // Use tempDir as repoPath
+	// Setup test environment
+	tempDir, repo := setupTestRepo(t)
 	defer os.RemoveAll(tempDir)
 
-	// Get the worktree and initial commit
+	// Get the worktree (initial commit hash not needed directly here)
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
-	headRef, err := repo.Head()
+	_, err = repo.Head() // Ensure repo head is read okay
 	require.NoError(t, err)
-	initialCommitHash := headRef.Hash()
 
 	// Create branches similar to TestRebaseAndUndoWithActualRepo
 	createTestBranch(t, repo, "base-branch", 3)
@@ -328,7 +326,7 @@ func TestRebaseUndoRecreatesDeletedBranch(t *testing.T) {
 			},
 		},
 	}
-	config := createTestConfig(t, tempDir, towerName, towers, initialCommitHash.String())
+	config := createTestConfig(t, tempDir, towerName, towers, "main")
 	err = SaveConfig(config)
 	require.NoError(t, err)
 	err = os.Chdir(tempDir)

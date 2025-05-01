@@ -147,14 +147,13 @@ func (a *AddCmd) Run(_ *kong.Context) error {
 			return fmt.Errorf("base branch '%s' not found in repository", baseBranch)
 		}
 
-		mergeBase, err := findMergeBase(r, addBranchRef.Hash(), baseBranchRef.Hash())
+		_, err = findMergeBase(r, addBranchRef.Hash(), baseBranchRef.Hash())
 		if err != nil {
-			fmt.Printf("Could not find merge base, using HEAD of %s as tower base\n", baseBranch)
-			tower.Base = baseBranchRef.Hash().String()
+			fmt.Printf("⚠️ Warning: Could not find merge base between %s and %s. Not setting tower base.\n", a.Name, baseBranch)
 		} else {
-			tower.Base = mergeBase.String()
 			fmt.Printf("Found merge base between %s and %s, using it as tower base\n", baseBranch, a.Name)
 			fmt.Println("If this is not what you want, you can set the base branch manually using 'ghenga base <commit>'")
+			tower.Base = baseBranch
 		}
 	}
 

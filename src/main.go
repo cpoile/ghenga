@@ -25,6 +25,7 @@ func (v VersionFlag) BeforeApply(app *kong.Kong, vars kong.Vars) error {
 type Globals struct {
 	Version    VersionFlag               `name:"version" help:"Print version information and quit"`
 	Completion kongcompletion.Completion `cmd:"" help:"Outputs shell code for initialising tab completions" completion-shell-default:"false"`
+	Config     ConfigCmd                 `cmd:"config" help:"Print the location of the config file"`
 }
 
 type InitCmd struct {
@@ -78,17 +79,16 @@ func (c *ConfigCmd) Run(_ *kong.Context) error {
 type CLI struct {
 	Globals
 
+	Init    InitCmd    `cmd:"init" help:"Initialize the current repository in ghenga config"`
 	Ls      LsCmd      `cmd:"" help:"List all towers in current repository"`
 	Branch  BranchCmd  `cmd:"branch" help:"Operate on branches in the current tower: add, rm"`
-	Init    InitCmd    `cmd:"init" help:"Initialize the current repository in ghenga config"`
 	New     NewCmd     `cmd:"new" help:"Create a new tower in current repository and set it as current"`
 	Current CurrentCmd `cmd:"current" help:"Set the current tower"`
 	Rename  RenameCmd  `cmd:"rename" help:"Rename the current tower"`
-	Base    BaseCmd    `cmd:"base" help:"Set the tower's base commit"`
+	Base    BaseCmd    `cmd:"base" help:"Set the tower's base branch"`
 	Rm      RmTowerCmd `cmd:"rm" help:"Remove the specified tower"`
-	Rebase  RebaseCmd  `cmd:"rebase" help:"Rebase branches in the current tower (use 'rebase undo' to undo)"`
-	Config  ConfigCmd  `cmd:"config" help:"Print the location of the config file"`
-	Sync    SyncCmd    `cmd:"sync" help:"Synchronize tower branches with remote (push/pull/force-push) (use 'sync undo' to undo)"`
+	Rebase  RebaseCmd  `cmd:"rebase" help:"Rebase divergent tower branches (use 'rebase undo' to undo)"`
+	Sync    SyncCmd    `cmd:"sync" help:"Synchronize tower branches with remote (use 'sync undo' to undo)"`
 }
 
 func main() {

@@ -230,9 +230,8 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 	// main -> feature-base -> feature-middle -> feature-top
 
 	// Get the initial main branch reference (created by setupTestRepo)
-	headRef, err := repo.Head()
+	_, err := repo.Head()
 	require.NoError(t, err)
-	mainHash := headRef.Hash()
 
 	// Create feature-base branch with 2 commits
 	createTestBranch(t, repo, "feature-base", 2)
@@ -264,7 +263,7 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 			},
 		},
 	}
-	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
+	config := createTestConfig(t, repoPath, towerName, towers, "main")
 
 	// Run the list command
 	cmd := &LsCmd{}
@@ -290,7 +289,7 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 	// It has 2 commits of its own + the base commit marker
 	assert.Contains(t, output, "file-feature-base-0.txt")
 	assert.Contains(t, output, "file-feature-base-1.txt")
-	assert.Contains(t, output, "(base)")
+	assert.Contains(t, output, "(merge-base with main)")
 
 	// 3. The middle branch should only show its unique commits (not feature-base commits)
 	assert.Contains(t, output, "file-feature-middle-0.txt")
@@ -323,7 +322,7 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 	// Verify filtering by name produces the same output
 	assert.Equal(t, output, outputWithName, "Filtering by tower name should produce the same output")
 
-	// Test case for when the tower has no base commit set
+	// Test case for when the tower has no base branch set
 	config.Repos[0].Towers[0].Base = ""
 	// Rerun with modified config
 	outputNoBase := runLsCommandWithConfig(t, config, cmd)
@@ -339,9 +338,8 @@ func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 	defer cleanup()
 
 	// Get the initial main branch reference
-	headRef, err := repo.Head()
+	_, err := repo.Head()
 	require.NoError(t, err)
-	mainHash := headRef.Hash()
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
@@ -393,7 +391,7 @@ func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 			},
 		},
 	}
-	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
+	config := createTestConfig(t, repoPath, towerName, towers, "main")
 
 	// Run the list command
 	cmd := &LsCmd{}
@@ -426,9 +424,8 @@ func TestLsCmd_MiddleBranchDivergence_ExtraBaseCommits(t *testing.T) {
 	defer cleanup()
 
 	// Get the initial main branch reference
-	headRef, err := repo.Head()
+	_, err := repo.Head()
 	require.NoError(t, err)
-	mainHash := headRef.Hash()
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
@@ -471,7 +468,7 @@ func TestLsCmd_MiddleBranchDivergence_ExtraBaseCommits(t *testing.T) {
 			},
 		},
 	}
-	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
+	config := createTestConfig(t, repoPath, towerName, towers, "main")
 
 	// Run the list command
 	cmd := &LsCmd{}
@@ -523,9 +520,8 @@ func TestLsCmd_TopBranchDivergence(t *testing.T) {
 	defer cleanup()
 
 	// Get the initial main branch reference
-	headRef, err := repo.Head()
+	_, err := repo.Head()
 	require.NoError(t, err)
-	mainHash := headRef.Hash()
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
@@ -572,7 +568,7 @@ func TestLsCmd_TopBranchDivergence(t *testing.T) {
 			},
 		},
 	}
-	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
+	config := createTestConfig(t, repoPath, towerName, towers, "main")
 
 	// Run the list command
 	cmd := &LsCmd{}
@@ -606,9 +602,8 @@ func TestLsCmd_MultipleDivergences(t *testing.T) {
 	defer cleanup()
 
 	// Get the initial main branch reference
-	headRef, err := repo.Head()
+	_, err := repo.Head()
 	require.NoError(t, err)
-	mainHash := headRef.Hash()
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
@@ -670,7 +665,7 @@ func TestLsCmd_MultipleDivergences(t *testing.T) {
 			},
 		},
 	}
-	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
+	config := createTestConfig(t, repoPath, towerName, towers, "main")
 
 	// Run the list command
 	cmd := &LsCmd{}

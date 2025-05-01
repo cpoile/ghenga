@@ -47,6 +47,20 @@ func setupTestRepo(t *testing.T) (string, *git.Repository) {
 	})
 	require.NoError(t, err)
 
+	// Get the hash of the initial commit
+	commitHash, err := repo.ResolveRevision(plumbing.Revision("HEAD"))
+	require.NoError(t, err)
+
+	// Create the main branch pointing to the initial commit
+	mainBranchRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), *commitHash)
+	err = repo.Storer.SetReference(mainBranchRef)
+	require.NoError(t, err)
+
+	// Update HEAD to point to the main branch
+	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, mainBranchRef.Name())
+	err = repo.Storer.SetReference(headRef)
+	require.NoError(t, err)
+
 	return tempDir, repo
 }
 
@@ -176,12 +190,12 @@ func runLsCommandWithConfig(t *testing.T, config *Config, cmd *LsCmd) string {
 }
 
 // createTestConfig creates a standard Config object for tests with a single repo.
-// Optionally sets the Base commit on the first tower.
-func createTestConfig(t *testing.T, repoPath string, currentTower string, towers []*Tower, baseCommit string) *Config {
+// Optionally sets the Base branch on the first tower.
+func createTestConfig(t *testing.T, repoPath string, currentTower string, towers []*Tower, baseBranch string) *Config {
 	t.Helper()
-	// Set base on the first tower if provided and towers exist
-	if baseCommit != "" && len(towers) > 0 {
-		towers[0].Base = baseCommit
+	// Set base branch on the first tower if provided and towers exist
+	if baseBranch != "" && len(towers) > 0 {
+		towers[0].Base = baseBranch
 	}
 	return &Config{
 		Repos: []*RepoInfo{
