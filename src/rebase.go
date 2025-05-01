@@ -40,22 +40,43 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		return err
 	}
 
+	if currentTower.LastRebased != "" {
+		warningColor := color.New(color.FgRed).Add(color.Bold)
+		warningColor.Printf("WARNING: Found previous rebase undo state from %s.\n", currentTower.LastRebased)
+		warningColor.Println("Proceeding will clear this previous undo state. This cannot be undone.")
+		fmt.Print("Do you want to clear the previous undo state and continue with the rebase? [y/N]: ")
+		var clearResponse string
+		fmt.Scanln(&clearResponse)
+		if strings.ToLower(clearResponse) != "y" && strings.ToLower(clearResponse) != "yes" {
+			fmt.Println("Rebase operation cancelled.")
+			return nil
+		}
+		fmt.Println("Clearing previous rebase undo state...")
+		for i := range currentTower.Branches {
+			currentTower.Branches[i].LastReflogID = ""
+		}
+		currentTower.LastRebased = ""
+		if err := SaveConfig(config); err != nil {
+			return fmt.Errorf("failed to clear previous rebase undo state in config: %w", err)
+		}
+	}
+
+	fmt.Println("Saving pre-rebase state...")
 	currentTime := time.Now().Format(time.RFC3339)
 	currentTower.LastRebased = currentTime
 
-	// Store the current commit hash for each branch before rebasing
 	for i := range currentTower.Branches {
 		branch := &currentTower.Branches[i]
 		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
 		branchRef, err := gitRepo.Reference(branchRefName, true)
 		if err != nil {
-			// If branch doesn't exist in git, skip storing its hash
 			continue
 		}
 		branch.LastReflogID = branchRef.Hash().String()
 	}
 
 	if err := SaveConfig(config); err != nil {
+		// If this save fails, the timestamp might be set but not the hashes
 		return fmt.Errorf("failed to save configuration with branch states: %w", err)
 	}
 
@@ -233,6 +254,16 @@ type RebaseUndoCmd struct {
 }
 
 func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
+	// Check Git Status first
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusOutput, err := statusCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to check git status: %w", err)
+	}
+	if len(strings.TrimSpace(string(statusOutput))) > 0 {
+		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before undoing rebase")
+	}
+
 	config, _, currentTower, _, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
 		return err

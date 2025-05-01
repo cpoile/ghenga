@@ -88,6 +88,7 @@ type CLI struct {
 	Rm      RmTowerCmd `cmd:"rm" help:"Remove the specified tower"`
 	Rebase  RebaseCmd  `cmd:"rebase" help:"Rebase branches in the current tower (use 'rebase undo' to undo)"`
 	Config  ConfigCmd  `cmd:"config" help:"Print the location of the config file"`
+	Sync    SyncCmd    `cmd:"sync" help:"Synchronize tower branches with remote (push/pull/force-push) (use 'sync undo' to undo)"`
 }
 
 func main() {
@@ -104,7 +105,7 @@ func main() {
 	}
 	parser := kong.Must(&cli,
 		kong.Name("ghenga"),
-		kong.Description("A tool to manage stacked pull requests on Github"),
+		kong.Description("A tool to manage stacked pull requests with git"),
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{
 			Compact:             true,

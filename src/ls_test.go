@@ -275,11 +275,11 @@ func TestLsCmd_StaggeredCommitView(t *testing.T) {
 	assert.Contains(t, output, "Tower: stacked-tower")
 
 	// Find positions of each branch in the output to verify order
-	featureTopPos := strings.Index(output, "feature-top (current)\n")
+	featureTopPos := strings.Index(output, "feature-top (current) (remote does not exist)\n")
 	assert.True(t, featureTopPos != -1, "feature-top should be in the output")
-	featureMiddlePos := strings.Index(output, "feature-middle\n")
+	featureMiddlePos := strings.Index(output, "feature-middle (remote does not exist)\n")
 	assert.True(t, featureMiddlePos != -1, "feature-middle should be in the output")
-	featureBasePos := strings.Index(output, "feature-base\n")
+	featureBasePos := strings.Index(output, "feature-base (remote does not exist)\n")
 	assert.True(t, featureBasePos != -1, "feature-base should be in the output")
 
 	// Verify branches are in the correct order (top-to-bottom)
@@ -406,9 +406,9 @@ func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 	assert.Contains(t, output, "⚠️ This branch has diverged", "Output should contain divergence warning")
 
 	// Verify the top branch shows divergence from middle branch
-	topPos := strings.Index(output, "top-branch\n")
+	topPos := strings.Index(output, "top-branch (remote does not exist)\n")
 	assert.True(t, topPos != -1, "Top branch should be in the output")
-	middlePos := strings.Index(output, "middle-branch (current)\n")
+	middlePos := strings.Index(output, "middle-branch (current) (remote does not exist)\n")
 	assert.True(t, middlePos != -1, "Middle branch should be in the output")
 	divergencePos := strings.Index(output, "⚠️ This branch has diverged")
 	assert.True(t, divergencePos != -1, "Divergence warning should be in the output")
@@ -483,9 +483,9 @@ func TestLsCmd_MiddleBranchDivergence_ExtraBaseCommits(t *testing.T) {
 	assert.Contains(t, output, "Tower: test-tower")
 
 	// Check for divergence warning in the middle-branch section
-	middlePos := strings.Index(output, "middle-branch (current)\n")
+	middlePos := strings.Index(output, "middle-branch (current) (remote does not exist)\n")
 	assert.True(t, middlePos != -1, "Middle branch should be in the output")
-	basePos := strings.Index(output, "base-branch\n")
+	basePos := strings.Index(output, "base-branch (remote does not exist)\n")
 	assert.True(t, basePos != -1, "Base branch should be in the output")
 	assert.True(t, middlePos < basePos, "Middle branch should be listed before base branch")
 
@@ -585,9 +585,9 @@ func TestLsCmd_TopBranchDivergence(t *testing.T) {
 	assert.Contains(t, output, "⚠️ This branch has diverged", "Output should contain divergence warning")
 
 	// Verify the top branch shows divergence
-	topPos := strings.Index(output, "top-branch\n")
+	topPos := strings.Index(output, "top-branch (remote does not exist)\n")
 	assert.True(t, topPos != -1, "Top branch should be in the output")
-	middlePos := strings.Index(output, "middle-branch (current)\n")
+	middlePos := strings.Index(output, "middle-branch (current) (remote does not exist)\n")
 	assert.True(t, middlePos != -1, "Middle branch should be in the output")
 	divergencePos := strings.Index(output, "⚠️ This branch has diverged")
 	assert.True(t, divergencePos != -1, "Divergence warning should be in the output")
@@ -688,13 +688,13 @@ func TestLsCmd_MultipleDivergences(t *testing.T) {
 	assert.Contains(t, output, "Divergent commit on top branch", "Top branch divergent commit should be shown")
 
 	// Verify branch order and placement of warnings
-	topPos := strings.Index(output, "top-branch\n")
+	topPos := strings.Index(output, "top-branch (remote does not exist)\n")
 	assert.True(t, topPos != -1, "Top branch should be in the output")
-	thirdPos := strings.Index(output, "third-branch (current)\n")
+	thirdPos := strings.Index(output, "third-branch (current) (remote does not exist)\n")
 	assert.True(t, thirdPos != -1, "Third branch should be in the output")
-	middlePos := strings.Index(output, "middle-branch\n")
+	middlePos := strings.Index(output, "middle-branch (remote does not exist)\n")
 	assert.True(t, middlePos != -1, "Middle branch should be in the output")
-	basePos := strings.Index(output, "base-branch\n")
+	basePos := strings.Index(output, "base-branch (remote does not exist)\n")
 	assert.True(t, basePos != -1, "Base branch should be in the output")
 
 	// Find positions of divergence warnings

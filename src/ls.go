@@ -43,6 +43,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 	currentBranch := color.New(color.FgGreen).Add(color.Bold)
 	towerColor := color.New(color.FgBlue).Add(color.Bold)
 	branchColor := color.New(color.FgYellow)
+	statusColor := color.New(color.FgMagenta)
 	commitColor := color.New(color.FgWhite)
 	baseCommitColor := color.New(color.FgCyan)
 	divergedColor := color.New(color.FgRed).Add(color.Bold)
@@ -105,17 +106,48 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 			branch := tower.Branches[i]
 
 			branchRefName := plumbing.NewBranchReferenceName(branch.Name)
-			if headRef.Name().String() == branchRefName.String() {
-				currentBranch.Printf("  %s (current)\n", branch.Name)
-			} else {
-				branchColor.Printf("  %s\n", branch.Name)
-			}
-
 			branchRef, err := r.Reference(branchRefName, true)
 			if err != nil && errors.Is(err, plumbing.ErrReferenceNotFound) {
-				warningColor.Println("  ⚠️ Warning: ^^^ Branch not found ^^^")
+				// Print branch name even if not found locally, but mark it
+				branchColor.Printf("  %s", branch.Name)
+				warningColor.Println(" (local branch not found!) ")
+				continue // Skip commit listing and status check for non-existent local branches
+			} else if err != nil {
+				// Handle other errors getting local ref
+				branchColor.Printf("  %s", branch.Name)
+				warningColor.Printf(" (error: %v)\n", err)
 				continue
 			}
+
+			// Print branch name
+			if headRef.Name().String() == branchRefName.String() {
+				currentBranch.Printf("  %s (current)", branch.Name)
+			} else {
+				branchColor.Printf("  %s", branch.Name)
+			}
+
+			// Using "origin" as the default remote for status check
+			pushStatus, _, _, statusErr := GetBranchPushStatus(r, "origin", branch.Name)
+			statusString := ""
+			if statusErr != nil {
+				statusString = " (status check failed)"
+			} else {
+				switch pushStatus {
+				case LocalAhead:
+					statusString = " (local ahead, run: ghenga sync)"
+				case RemoteAhead:
+					statusString = " (remote ahead, run: ghenga sync)"
+				case Diverged:
+					statusString = " (diverged from remote, run: ghenga sync)"
+				case NoRemote:
+					statusString = " (remote does not exist)"
+					// UpToDate and StatusError (handled above) don't need explicit messages
+				}
+			}
+			if statusString != "" {
+				statusColor.Printf(statusString)
+			}
+			fmt.Println()
 
 			// Determine if we need to find the stop commit (branch below)
 			var stopAtCommit plumbing.Hash

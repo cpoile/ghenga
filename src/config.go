@@ -26,12 +26,14 @@ type Tower struct {
 	Base        string   `toml:"base"`
 	Branches    []Branch `toml:"branches"`
 	LastRebased string   `toml:"last_rebased,omitempty"` // Timestamp of the last rebase operation
+	LastSynced  string   `toml:"last_synced,omitempty"`  // Timestamp of last sync
 }
 
 // Branch represents a git branch
 type Branch struct {
-	Name         string `toml:"name"`
-	LastReflogID string `toml:"last_reflog_id,omitempty"` // Stores the commit hash before last rebase for undo operations
+	Name            string `toml:"name"`
+	LastReflogID    string `toml:"last_reflog_id,omitempty"`     // Stores the commit hash before last rebase for undo operations
+	PreSyncReflogID string `toml:"pre_sync_reflog_id,omitempty"` // Used for sync undo
 }
 
 // ConfigPathFunc is a function type that returns the path to the config file
