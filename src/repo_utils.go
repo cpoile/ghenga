@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -260,4 +261,73 @@ func detectDefaultBranch(r *git.Repository) string {
 
 	// If no default branch was found, return "main" as fallback
 	return "main"
+}
+
+// updateLocalBranchFromRemote fetches remote and updates local branch
+func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName, localBranch, currentBranchToPreserve string) error {
+	fmt.Printf("    Fetching remote '%s'...\n", remoteName)
+	fetchCmd := exec.Command("git", "fetch", remoteName)
+	fetchCmd.Dir = repoPath
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch failed: %w\nOutput: %s", err, string(output))
+	}
+
+	// Ensure the branch we want to update exists locally
+	localRefName := plumbing.NewBranchReferenceName(localBranch)
+	_, err := r.Reference(localRefName, true)
+	if err != nil {
+		return fmt.Errorf("local base branch '%s' not found: %w", localBranch, err)
+	}
+
+	// Ensure the remote tracking branch exists
+	remoteRefName := plumbing.NewRemoteReferenceName(remoteName, localBranch)
+	remoteRef, err := r.Reference(remoteRefName, true)
+	if err != nil {
+		return fmt.Errorf("remote tracking branch '%s' not found: %w", remoteRefName, err)
+	}
+
+	// Checkout the local branch if we are not already on it
+	currentlyOnLocalBranch := currentBranchToPreserve == localBranch
+	if !currentlyOnLocalBranch {
+		fmt.Printf("    Checking out local branch '%s'...\n", localBranch)
+		checkoutCmd := exec.Command("git", "checkout", localBranch)
+		checkoutCmd.Dir = repoPath
+		if output, err := checkoutCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to checkout local branch '%s': %w\nOutput: %s", localBranch, err, string(output))
+		}
+	}
+
+	// Reset the local branch to the remote's state
+	fmt.Printf("    Resetting '%s' to '%s' (%s)...\n", localBranch, remoteRefName, remoteRef.Hash().String()[:7])
+	resetCmd := exec.Command("git", "reset", "--hard", remoteRefName.String())
+	resetCmd.Dir = repoPath
+	if output, err := resetCmd.CombinedOutput(); err != nil {
+		// Attempt to checkout original branch even if reset fails
+		return fmt.Errorf("git reset --hard failed: %w\nOutput: %s", err, string(output))
+	}
+
+	// If we checked out the local branch temporarily, check back out to original branch now
+	if !currentlyOnLocalBranch && currentBranchToPreserve != "" {
+		fmt.Printf("    Checking out original branch '%s'...\n", currentBranchToPreserve)
+		checkoutCmd := exec.Command("git", "checkout", currentBranchToPreserve)
+		checkoutCmd.Dir = repoPath
+		if output, err := checkoutCmd.CombinedOutput(); err != nil {
+			// This is problematic, we updated local but couldn't switch back
+			return fmt.Errorf("CRITICAL: failed to checkout original branch '%s' after updating base branch: %w\nOutput: %s", currentBranchToPreserve, err, string(output))
+		}
+	}
+
+	return nil
+}
+
+// getCurrentBranchName returns the name of the current branch
+func getCurrentBranchName(r *git.Repository) (string, error) {
+	headRef, err := r.Head()
+	if err != nil {
+		return "", fmt.Errorf("failed to get HEAD: %w", err)
+	}
+	if !headRef.Name().IsBranch() {
+		return "", fmt.Errorf("HEAD is detached")
+	}
+	return headRef.Name().Short(), nil
 }

@@ -80,15 +80,16 @@ type CLI struct {
 	Globals
 
 	Init    InitCmd    `cmd:"init" help:"Initialize the current repository in ghenga config"`
+	New     NewCmd     `cmd:"new" help:"Create a new tower in current repository and set it as current"`
 	Ls      LsCmd      `cmd:"" help:"List all towers in current repository"`
 	Branch  BranchCmd  `cmd:"branch" help:"Operate on branches in the current tower: add, rm"`
-	New     NewCmd     `cmd:"new" help:"Create a new tower in current repository and set it as current"`
 	Current CurrentCmd `cmd:"current" help:"Set the current tower"`
 	Rename  RenameCmd  `cmd:"rename" help:"Rename the current tower"`
 	Base    BaseCmd    `cmd:"base" help:"Set the tower's base branch"`
 	Rm      RmTowerCmd `cmd:"rm" help:"Remove the specified tower"`
 	Rebase  RebaseCmd  `cmd:"rebase" help:"Rebase divergent tower branches (use 'rebase undo' to undo)"`
 	Sync    SyncCmd    `cmd:"sync" help:"Synchronize tower branches with remote (use 'sync undo' to undo)"`
+	Land    LandCmd    `cmd:"land" help:"Merge the bottom branch of the tower into the base branch and rebase the rest of the tower"`
 }
 
 func main() {

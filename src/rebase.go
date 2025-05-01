@@ -8,6 +8,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
+	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
@@ -30,7 +31,7 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before rebasing")
 	}
 
-	config, _, currentTower, _, err := loadRepoInfoAndCurrentTower()
+	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
 		return err
 	}
@@ -40,10 +41,24 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		return err
 	}
 
-	if currentTower.LastRebased != "" {
+	return rebaseTower(config, currentTower, repoPath, gitRepo, false) // Call the refactored function
+}
+
+// rebaseTower performs the core logic of rebasing a tower's branches.
+// It checks for divergence, saves undo state, asks for confirmation (if skipConfirmation is false),
+// and performs the sequential rebase.
+func rebaseTower(config *Config, currentTower *Tower, repoPath string, gitRepo *git.Repository, skipConfirmation bool) error {
+	if currentTower.Base == "" {
+		return fmt.Errorf("tower '%s' has no base branch set. Use 'ghenga base <branch-name>' to set it first", currentTower.Name)
+	}
+	if len(currentTower.Branches) < 2 {
+		fmt.Printf("Tower '%s' has less than two branches, nothing to rebase relative to each other.\n", currentTower.Name)
+		return nil
+	}
+
+	if !skipConfirmation && currentTower.LastRebased != "" {
 		warningColor := color.New(color.FgRed).Add(color.Bold)
 		warningColor.Printf("WARNING: Found previous rebase undo state from %s.\n", currentTower.LastRebased)
-		warningColor.Println("Proceeding will clear this previous undo state. This cannot be undone.")
 		fmt.Print("Do you want to clear the previous undo state and continue with the rebase? [y/N]: ")
 		var clearResponse string
 		fmt.Scanln(&clearResponse)
@@ -51,14 +66,17 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 			fmt.Println("Rebase operation cancelled.")
 			return nil
 		}
-		fmt.Println("Clearing previous rebase undo state...")
-		for i := range currentTower.Branches {
-			currentTower.Branches[i].LastReflogID = ""
-		}
-		currentTower.LastRebased = ""
-		if err := SaveConfig(config); err != nil {
-			return fmt.Errorf("failed to clear previous rebase undo state in config: %w", err)
-		}
+	}
+
+	// Always clear previous state if proceeding
+	fmt.Println("Clearing/preparing rebase undo state...")
+	for i := range currentTower.Branches {
+		currentTower.Branches[i].LastReflogID = ""
+	}
+	currentTower.LastRebased = ""
+	// Save cleared state first before adding new state
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to clear previous rebase undo state in config: %w", err)
 	}
 
 	fmt.Println("Saving pre-rebase state...")
@@ -70,6 +88,7 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
 		branchRef, err := gitRepo.Reference(branchRefName, true)
 		if err != nil {
+			fmt.Printf("  Warning: Could not get current ref for branch '%s' to save undo state: %v\n", branch.Name, err)
 			continue
 		}
 		branch.LastReflogID = branchRef.Hash().String()
@@ -77,6 +96,7 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 
 	if err := SaveConfig(config); err != nil {
 		// If this save fails, the timestamp might be set but not the hashes
+		// TODO: Should we attempt to clear the timestamp if hashes weren't saved?
 		return fmt.Errorf("failed to save configuration with branch states: %w", err)
 	}
 
