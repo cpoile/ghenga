@@ -369,11 +369,11 @@ func (cmd *SyncUndoCmd) Run(ctx *kong.Context) error {
 
 	warningColor := color.New(color.FgRed).Add(color.Bold)
 
-	warningColor.Println("\nWARNING: Undoing the last sync will reset branches to their previous state.")
+	warningColor.Println("\nWARNING: Undoing the last sync will reset LOCAL branches to their previous state.")
 	warningColor.Printf("This will attempt to restore %d branches to their state before the sync on %s.\n",
 		branchesToRestore, currentTower.LastSynced)
 	warningColor.Println("Any changes made to these branches after the sync might be lost.")
-	warningColor.Println("This operation modifies local branches only.")
+	warningColor.Println("This operation modifies local branches only. You will need to push/force-push them to the remote manually.")
 
 	fmt.Print("\nDo you want to proceed with undoing the last sync? [y/N]: ")
 	var response string
