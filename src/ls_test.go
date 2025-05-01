@@ -420,6 +420,103 @@ func TestLsCmd_MiddleBranchDivergence(t *testing.T) {
 	assert.Contains(t, output, "Divergent commit on middle branch", "Divergent commit should be shown")
 }
 
+func TestLsCmd_MiddleBranchDivergence_ExtraBaseCommits(t *testing.T) {
+	// Setup test environment and get repo object
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	// Get the initial main branch reference
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	mainHash := headRef.Hash()
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	// Step 1: Create the base branch with 3 commits (branches off main/HEAD)
+	baseBranchName := "base-branch"
+	createTestBranch(t, repo, baseBranchName, 3) // Commits B0, B1, B2
+
+	// Get base branch reference
+	baseRef, err := repo.Reference(plumbing.NewBranchReferenceName(baseBranchName), true)
+	require.NoError(t, err)
+	baseHeadAtMiddleBranchCreation := baseRef.Hash() // Remember this hash
+
+	// Step 2: Create branch-2 (middle-branch) off base branch's HEAD (B2), with 2 commits
+	middleBranchName := "middle-branch"
+	err = wt.Checkout(&git.CheckoutOptions{Hash: baseHeadAtMiddleBranchCreation})
+	require.NoError(t, err)
+	createTestBranch(t, repo, middleBranchName, 2) // Commits M0, M1
+
+	// Step 3: Checkout base-branch again and add 2 more commits
+	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(baseBranchName)})
+	require.NoError(t, err)
+	addSingleCommit(t, repoPath, wt, "extra-base-1.txt", "extra content", "Extra commit on base branch 1") // Commit B3
+	addSingleCommit(t, repoPath, wt, "extra-base-2.txt", "extra content", "Extra commit on base branch 2") // Commit B4
+
+	// Step 4: Checkout middle-branch and add a divergent commit
+	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(middleBranchName)})
+	require.NoError(t, err)
+	addSingleCommit(t, repoPath, wt, "divergent-middle.txt", "divergent content", "Divergent commit on middle branch") // Commit M2
+
+	// Initialize config with one tower and all branches in order
+	towerName := "test-tower"
+	towers := []*Tower{
+		{
+			Name: towerName,
+			// Base is set via createTestConfig
+			Branches: []Branch{
+				{Name: baseBranchName},
+				{Name: middleBranchName},
+			},
+		},
+	}
+	config := createTestConfig(t, repoPath, towerName, towers, mainHash.String())
+
+	// Run the list command
+	cmd := &LsCmd{}
+	output := runLsCommandWithConfig(t, config, cmd)
+
+	t.Log(output)
+
+	// Verify output
+	assert.Contains(t, output, "Tower: test-tower")
+
+	// Check for divergence warning in the middle-branch section
+	middlePos := strings.Index(output, "middle-branch (current)\n")
+	assert.True(t, middlePos != -1, "Middle branch should be in the output")
+	basePos := strings.Index(output, "base-branch\n")
+	assert.True(t, basePos != -1, "Base branch should be in the output")
+	assert.True(t, middlePos < basePos, "Middle branch should be listed before base branch")
+
+	middleSection := output[middlePos:basePos]
+
+	assert.Contains(t, middleSection, "⚠️ This branch has diverged", "Middle branch section should contain divergence warning")
+
+	// Verify the divergent commit is shown in the middle branch section
+	assert.Contains(t, middleSection, "Divergent commit on middle branch", "Divergent commit M2 should be shown")
+
+	// Verify the *original* commits of the middle branch are shown
+	assert.Contains(t, middleSection, "Add file-middle-branch-0.txt", "Commit M0 should be shown")
+	assert.Contains(t, middleSection, "Add file-middle-branch-1.txt", "Commit M1 should be shown")
+
+	// Verify commits added to base-branch *after* middle-branch diverged are NOT shown in the middle-branch listing
+	assert.NotContains(t, middleSection, "Extra commit on base branch 1", "Commit B3 should NOT be shown in middle branch")
+	assert.NotContains(t, middleSection, "Extra commit on base branch 2", "Commit B4 should NOT be shown in middle branch")
+
+	// !! Key Assertion: Verify the original base commits *before* divergence ARE NOT shown below the warning
+	assert.NotContains(t, middleSection, "Add file-base-branch-1.txt", "Commits from base branch before divergence should NOT be shown in middle branch")
+	assert.NotContains(t, middleSection, "Add file-base-branch-0.txt", "Commits from base branch before divergence should NOT be shown in middle branch")
+
+	// Verify the base branch section shows all its commits, including the extra ones
+	baseSection := output[basePos:]
+	assert.Contains(t, baseSection, "Extra commit on base branch 1", "Commit B3 should be shown in base branch")
+	assert.Contains(t, baseSection, "Extra commit on base branch 2", "Commit B4 should be shown in base branch")
+	assert.Contains(t, baseSection, "Add file-base-branch-0.txt", "Commit B0 should be shown in base branch")
+	assert.Contains(t, baseSection, "Add file-base-branch-1.txt", "Commit B1 should be shown in base branch")
+	assert.Contains(t, baseSection, "Add file-base-branch-2.txt", "Commit B2 should be shown in base branch")
+}
+
 func TestLsCmd_TopBranchDivergence(t *testing.T) {
 	// Setup test environment and get repo object
 	repoPath, repo, cleanup := setupTestEnv(t)

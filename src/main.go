@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
-
-	"slices"
 
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
@@ -204,6 +203,10 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 				// Show divergence warning just above the common ancestor
 				if hasDiverged && commit.Hash == divergencePoint {
 					divergedColor.Printf("    ⚠️ This branch has diverged ↓↓ here ↓↓ from the branch below\n")
+					// Print the divergence point itself (highlighted) and then stop for this branch
+					message := strings.Split(commit.Message, "\n")[0]
+					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
+					break // Stop listing commits for this diverged branch after the divergence point
 				}
 
 				message := strings.Split(commit.Message, "\n")[0]
