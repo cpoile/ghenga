@@ -398,6 +398,7 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 
 	// Try to continue the cherry-pick operation
 	fmt.Printf("Attempting to continue cherry-pick on branch '%s'...\n", state.TemporaryBranch)
+	needsManualCommitHandling := false
 	continueCmd := exec.Command("git", "cherry-pick", "--continue")
 	continueCmd.Dir = repoPath
 	if output, err := continueCmd.CombinedOutput(); err != nil {
@@ -406,9 +407,9 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 		// Or if they run continue twice after resolving.
 		if strings.Contains(string(output), "no cherry-pick or revert in progress") || strings.Contains(string(output), "no cherry-pick in progress") {
 			fmt.Println("No cherry-pick operation to continue directly. Assuming conflict was resolved and committed.")
-			// We should still check if the commit index needs advancing.
-			// This scenario is tricky. Let's assume the user's manual commit corresponds to the failed commit.
-			// We will proceed by trying to pick the *next* commit.
+			needsManualCommitHandling = true
+			// The commit at state.CurrentCommitIndex was handled manually.
+			// We need to start the loop from the *next* index.
 		} else {
 			// A real error occurred during --continue
 			conflictColor := color.New(color.FgRed).Add(color.Bold)
@@ -424,10 +425,6 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 		// Increment the index for the *next* commit to be applied in the loop.
 		state.CurrentCommitIndex++
 		// Save the incremented index? Yes, ensures we don't retry the commit if continue fails again somehow.
-		if errSave := SaveConfig(config); errSave != nil {
-			fmt.Printf("Warning: failed to save config after successful cherry-pick continue: %v\n", errSave)
-			// Continue anyway, but state might be slightly off if next pick fails immediately.
-		}
 	}
 
 	// Loop through remaining branches and commits
@@ -435,9 +432,16 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 	originalBranch := state.OriginalBranch // Get from loaded state
 
 	for len(state.RemainingBranchInfos) > 0 {
-		currentBranchInfo := state.RemainingBranchInfos[0]
-		currentTempBranch := state.TemporaryBranch // Get from loaded state
-		startIndex := state.CurrentCommitIndex     // Start from where we left off (or the next one after --continue)
+		currentBranchInfo := state.RemainingBranchInfos[0] // Info for the branch being processed
+		currentTempBranch := state.TemporaryBranch         // Temp branch associated with this attempt
+		startIndex := state.CurrentCommitIndex             // Where the *previous* attempt left off
+
+		// If we detected a manual commit, the commit at startIndex was handled.
+		// We must start applying from the *next* commit.
+		if needsManualCommitHandling {
+			startIndex++
+			needsManualCommitHandling = false // Reset flag for subsequent branches/loops
+		}
 
 		fmt.Printf("Continuing rebase for branch '%s' onto '%s'...\n", currentBranchInfo.Name, currentBranchInfo.BaseBranchName)
 
