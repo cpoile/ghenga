@@ -23,7 +23,7 @@ func TestConfigCreateAndRead(t *testing.T) {
 
 	// Create test configuration
 	testConfig := &Config{
-		Repos: []*Repo{
+		Repos: []*RepoInfo{
 			{
 				Path: "/Users/test/projects/project1",
 				Towers: []*Tower{

@@ -30,7 +30,7 @@ func TestInitCmd(t *testing.T) {
 
 	// Initialize empty config
 	emptyConfig := &Config{
-		Repos: []*Repo{},
+		Repos: []*RepoInfo{},
 	}
 	err = SaveConfig(emptyConfig)
 	require.NoError(t, err)

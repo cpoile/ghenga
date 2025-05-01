@@ -10,11 +10,11 @@ import (
 
 // Config represents the top-level configuration
 type Config struct {
-	Repos []*Repo `toml:"repos"`
+	Repos []*RepoInfo `toml:"repos"`
 }
 
-// Repo represents a git repository configuration
-type Repo struct {
+// RepoInfo represents a git repository configuration
+type RepoInfo struct {
 	Path    string   `toml:"path"`
 	Current string   `toml:"current"`
 	Towers  []*Tower `toml:"towers"`
@@ -67,7 +67,7 @@ func LoadConfig() (*Config, error) {
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
 		// Create default config if it doesn't exist
 		defaultConfig := &Config{
-			Repos: []*Repo{},
+			Repos: []*RepoInfo{},
 		}
 		if err := SaveConfig(defaultConfig); err != nil {
 			return nil, err

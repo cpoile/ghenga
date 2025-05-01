@@ -184,7 +184,7 @@ func createTestConfig(t *testing.T, repoPath string, currentTower string, towers
 		towers[0].Base = baseCommit
 	}
 	return &Config{
-		Repos: []*Repo{
+		Repos: []*RepoInfo{
 			{
 				Path:    repoPath,
 				Current: currentTower,
@@ -213,4 +213,15 @@ func addSingleCommit(t *testing.T, repoPath string, wt *git.Worktree, filename, 
 	})
 	require.NoError(t, err, "Failed to commit")
 	return commitHash
+}
+
+// mockInput redirects stdin to provide the specified input string for testing prompts.
+// It returns a function that restores the original stdin.
+func mockInput(input string) func() {
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	w.Write([]byte(input + "\n"))
+	w.Close()
+	return func() { os.Stdin = oldStdin }
 }

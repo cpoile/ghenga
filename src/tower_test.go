@@ -19,7 +19,7 @@ type KongRunnable interface {
 // runTowerCommandAndGetRepo runs a KongRunnable command, reloads the config,
 // finds the repo config for the given path, and returns it along with any error
 // from the command execution.
-func runTowerCommandAndGetRepo(t *testing.T, cmd KongRunnable, ctx *kong.Context, repoPath string) (*Repo, error) {
+func runTowerCommandAndGetRepo(t *testing.T, cmd KongRunnable, ctx *kong.Context, repoPath string) (*RepoInfo, error) {
 	t.Helper()
 	runErr := cmd.Run(ctx) // Run the command first
 
@@ -153,7 +153,7 @@ func TestTower_CurrentCommand(t *testing.T) {
 
 func TestTower_GetCurrentTower(t *testing.T) {
 	// Create a repo with multiple towers and a current tower set
-	repo := &Repo{
+	repo := &RepoInfo{
 		Path:    "/test/path",
 		Current: "second-tower",
 		Towers: []*Tower{

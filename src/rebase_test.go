@@ -226,14 +226,6 @@ func TestRebaseAndUndoWithActualRepo(t *testing.T) {
 	assert.Contains(t, preRebaseOutput, "⚠️ This branch has diverged", "Pre-rebase output should show divergence")
 
 	// 3. Mock user input for the rebase command (automatic "yes" to prompts)
-	mockInput := func(input string) func() {
-		oldStdin := os.Stdin
-		r, w, _ := os.Pipe()
-		os.Stdin = r
-		w.Write([]byte(input + "\n"))
-		w.Close()
-		return func() { os.Stdin = oldStdin }
-	}
 	restoreStdin := mockInput("y")
 	defer restoreStdin()
 
@@ -280,6 +272,124 @@ func TestRebaseAndUndoWithActualRepo(t *testing.T) {
 	assert.NotNil(t, tower, "Tower should exist")
 	assert.Empty(t, tower.LastRebased, "LastRebased should be cleared after undo")
 
+	for _, branch := range tower.Branches {
+		assert.Empty(t, branch.LastReflogID,
+			"Branch %s should have LastReflogID cleared after undo", branch.Name)
+	}
+}
+
+func TestRebaseUndoRecreatesDeletedBranch(t *testing.T) {
+	// Setup test repository
+	tempDir, repo := setupTestRepo(t) // Use tempDir as repoPath
+	defer os.RemoveAll(tempDir)
+
+	// Get the worktree and initial commit
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	headRef, err := repo.Head()
+	require.NoError(t, err)
+	initialCommitHash := headRef.Hash()
+
+	// Create branches similar to TestRebaseAndUndoWithActualRepo
+	createTestBranch(t, repo, "base-branch", 3)
+	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("base-branch")})
+	require.NoError(t, err)
+	createTestBranch(t, repo, "middle-branch", 2)
+	middleRef, err := repo.Reference(plumbing.NewBranchReferenceName("middle-branch"), true)
+	require.NoError(t, err)
+	err = wt.Checkout(&git.CheckoutOptions{Hash: middleRef.Hash()})
+	require.NoError(t, err)
+	createTestBranch(t, repo, "top-branch", 2)
+	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("base-branch")})
+	require.NoError(t, err)
+	addSingleCommit(t, tempDir, wt, "divergent-base.txt", "divergent base content", "Divergent commit on base branch")
+
+	// Setup Config
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(oldWd)
+	configTempDir, err := os.MkdirTemp("", "ghenga-test-recreate-config")
+	require.NoError(t, err)
+	defer os.RemoveAll(configTempDir)
+	err = os.Chdir(configTempDir)
+	require.NoError(t, err)
+	configFile := filepath.Join(configTempDir, "config.toml")
+	oldConfigPath := ConfigPath
+	defer func() { ConfigPath = oldConfigPath }()
+	ConfigPath = mockedConfigPath(configFile)
+	towerName := "test-tower-recreate"
+	towers := []*Tower{
+		{
+			Name: towerName,
+			Branches: []Branch{
+				{Name: "base-branch"},
+				{Name: "middle-branch"},
+				{Name: "top-branch"},
+			},
+		},
+	}
+	config := createTestConfig(t, tempDir, towerName, towers, initialCommitHash.String())
+	err = SaveConfig(config)
+	require.NoError(t, err)
+	err = os.Chdir(tempDir)
+	require.NoError(t, err)
+
+	// Mock user input for the rebase command
+	restoreRebaseStdin := mockInput("y")
+	defer restoreRebaseStdin()
+
+	// Run the rebase command
+	rebaseCmd := &RebaseDoCmd{}
+	err = rebaseCmd.Run(nil)
+	require.NoError(t, err, "Failed to run rebase command")
+
+	// Load config to get the reflog ID stored by the rebase command
+	configAfterRebase, err := LoadConfig()
+	require.NoError(t, err)
+	towerAfterRebase := FindTowerByName(configAfterRebase.Repos[0], towerName)
+	require.NotNil(t, towerAfterRebase)
+
+	branchToDeleTe := "middle-branch"
+	var preRebaseHashOfDeletedBranch string
+	for _, b := range towerAfterRebase.Branches {
+		if b.Name == branchToDeleTe {
+			preRebaseHashOfDeletedBranch = b.LastReflogID
+			break
+		}
+	}
+	require.NotEmpty(t, preRebaseHashOfDeletedBranch, "Could not find pre-rebase hash for %s", branchToDeleTe)
+
+	// Delete the middle branch
+	headAfterRebase, err := repo.Head()
+	require.NoError(t, err)
+	if headAfterRebase.Name().Short() == branchToDeleTe {
+		err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("base-branch")})
+		require.NoError(t, err)
+	}
+	err = repo.Storer.RemoveReference(plumbing.NewBranchReferenceName(branchToDeleTe))
+	require.NoError(t, err, "Failed to delete branch %s", branchToDeleTe)
+
+	// Mock user input for the undo command
+	restoreUndoStdin := mockInput("y")
+	defer restoreUndoStdin()
+
+	// Run rebase undo
+	undoCmd := &RebaseUndoCmd{}
+	err = undoCmd.Run(nil)
+	require.NoError(t, err, "Failed to run rebase undo command")
+
+	// Verify the deleted branch was recreated and points to the correct commit
+	recreatedRef, err := repo.Reference(plumbing.NewBranchReferenceName(branchToDeleTe), true)
+	require.NoError(t, err, "Branch %s should have been recreated by undo", branchToDeleTe)
+	assert.Equal(t, preRebaseHashOfDeletedBranch, recreatedRef.Hash().String(),
+		"Recreated branch %s should point to its pre-rebase hash", branchToDeleTe)
+
+	// Verify stored branch-specific reflog IDs were cleared
+	finalConfig, err := LoadConfig()
+	require.NoError(t, err)
+	tower := FindTowerByName(finalConfig.Repos[0], towerName)
+	assert.NotNil(t, tower, "Tower should exist")
+	assert.Empty(t, tower.LastRebased, "LastRebased should be cleared after undo")
 	for _, branch := range tower.Branches {
 		assert.Empty(t, branch.LastReflogID,
 			"Branch %s should have LastReflogID cleared after undo", branch.Name)

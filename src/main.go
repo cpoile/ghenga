@@ -19,6 +19,8 @@ import (
 	"github.com/posener/complete"
 )
 
+const MAX_COMMITS_PER_BRANCH_TO_DISPLAY = 100
+
 var Version = "0.1.0"
 
 type VersionFlag string
@@ -41,39 +43,29 @@ type LsCmd struct {
 }
 
 func (l *LsCmd) Run(_ *kong.Context) error {
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	_, repo, _, err := loadRepoConfig()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
+		// Handle the specific error where the repo is not found but config loaded
+		if repo == nil && strings.Contains(err.Error(), "not found in configuration") {
+			parts := strings.SplitN(err.Error(), "'", 3)
+			if len(parts) == 3 {
+				return fmt.Errorf("repository at '%s' not found in configuration", parts[1])
+			}
+			return err
+		}
+		return err
 	}
 
-	// Load configuration
-	config, err := LoadConfig()
+	r, err := openGitRepo()
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return err
 	}
 
-	// Find repository in config
-	repo := FindRepoByPath(config, repoPath)
-	if repo == nil {
-		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
-	}
-
-	// Open the repository
-	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-
-	// Get the HEAD reference
 	headRef, err := r.Head()
 	if err != nil {
 		return fmt.Errorf("failed to get HEAD: %w", err)
 	}
 
-	// Create color formatters
 	currentBranch := color.New(color.FgGreen).Add(color.Bold)
 	towerColor := color.New(color.FgBlue).Add(color.Bold)
 	branchColor := color.New(color.FgYellow)
@@ -94,16 +86,13 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 		towers = repo.Towers
 	}
 
-	// Iterate through towers
 	for _, tower := range towers {
 		towerColor.Printf("Tower: %s", tower.Name)
 
-		// Check if this is the current tower
 		if repo.Current == tower.Name {
 			currentBranch.Printf(" (current)")
 		}
 
-		// Show base commit if set
 		if tower.Base != "" {
 			baseCommitColor.Printf(" [base: %s]", tower.Base[:7])
 		}
@@ -137,11 +126,10 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 			}
 		}
 
-		// Iterate through branches in reverse order
+		// Display most recent branches first (like git log)
 		for i := len(tower.Branches) - 1; i >= 0; i-- {
 			branch := tower.Branches[i]
 
-			// Check if this is the current branch
 			branchRefName := plumbing.NewBranchReferenceName(branch.Name)
 			if headRef.Name().String() == branchRefName.String() {
 				currentBranch.Printf("  %s (current)\n", branch.Name)
@@ -151,8 +139,8 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 
 			// Find branch reference and get commits
 			branchRef, err := r.Reference(branchRefName, true)
-			if err != nil {
-				// Skip if branch doesn't exist in git
+			if err != nil && errors.Is(err, plumbing.ErrReferenceNotFound) {
+				warningColor.Println("  ⚠️ Warning: ^^^ Branch not found ^^^")
 				continue
 			}
 
@@ -182,13 +170,12 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 				}
 			}
 
-			// Get commit history
+			// Display commits
 			commitIter, err := r.Log(&git.LogOptions{From: branchRef.Hash()})
 			if err != nil {
 				continue
 			}
 
-			// Collect commits
 			var commits []*object.Commit
 			count := 0
 			commitIter.ForEach(func(c *object.Commit) error {
@@ -203,7 +190,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 					return fmt.Errorf("stop")
 				}
 
-				if count < 10 { // Limit commits shown per branch
+				if count < MAX_COMMITS_PER_BRANCH_TO_DISPLAY {
 					commits = append(commits, c)
 					count++
 					return nil
@@ -211,7 +198,6 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 				return fmt.Errorf("stop")
 			})
 
-			// Display commits
 			for j := range commits {
 				commit := commits[j]
 
@@ -239,88 +225,6 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 	return nil
 }
 
-// findMergeBase finds the merge base (common ancestor) between two commits
-func findMergeBase(r *git.Repository, commit1, commit2 plumbing.Hash) (plumbing.Hash, error) {
-	// If commits are the same, return immediately
-	if commit1 == commit2 {
-		return commit1, nil
-	}
-
-	// Get commit objects
-	c1, err := r.CommitObject(commit1)
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-
-	c2, err := r.CommitObject(commit2)
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-
-	// Find merge base using go-git's MergeBase function
-	mergeBase, err := c1.MergeBase(c2)
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-
-	if len(mergeBase) == 0 {
-		return plumbing.ZeroHash, fmt.Errorf("no common ancestor found")
-	}
-
-	return mergeBase[0].Hash, nil
-}
-
-// detectDefaultBranch attempts to determine the default branch name for the repository
-func detectDefaultBranch(r *git.Repository) string {
-	// Common default branch names to check in priority order
-	possibleDefaults := []string{"main", "master", "trunk", "development"}
-
-	// First try to get the HEAD reference of the origin remote
-	remotes, err := r.Remotes()
-	if err == nil && len(remotes) > 0 {
-		// Try to find the origin remote
-		var originRemote *git.Remote
-		for _, remote := range remotes {
-			if remote.Config().Name == "origin" {
-				originRemote = remote
-				break
-			}
-		}
-
-		// If we found origin, try to get its HEAD reference
-		if originRemote != nil {
-			// List references from the remote
-			refs, err := r.References()
-			if err == nil {
-				// Look for a HEAD symbolic reference
-				refs.ForEach(func(ref *plumbing.Reference) error {
-					if ref.Name().String() == "refs/remotes/origin/HEAD" {
-						// Extract the branch name from the target
-						target := ref.Target().String()
-						if strings.HasPrefix(target, "refs/remotes/origin/") {
-							branch := strings.TrimPrefix(target, "refs/remotes/origin/")
-							possibleDefaults = []string{branch} // Override with the actual default
-							return fmt.Errorf("stop")
-						}
-					}
-					return nil
-				})
-			}
-		}
-	}
-
-	// Check each possible default branch to see if it exists
-	for _, branchName := range possibleDefaults {
-		branchRef, err := r.Reference(plumbing.NewBranchReferenceName(branchName), true)
-		if err == nil && branchRef != nil {
-			return branchName
-		}
-	}
-
-	// If no default branch was found, return "main" as fallback
-	return "main"
-}
-
 type BranchCmd struct {
 	Add AddCmd `cmd:"add" help:"Add a branch to a tower in current repository"`
 	Rm  RmCmd  `cmd:"rm" help:"Remove a branch from the current tower"`
@@ -332,43 +236,32 @@ type AddCmd struct {
 }
 
 func (a *AddCmd) Run(_ *kong.Context) error {
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	config, repo, repoPath, err := loadOrCreateRepoConfig()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
+		return err
 	}
 
-	// Load configuration
-	config, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+	// Determine the target tower
+	targetTowerName := a.Tower
+	if targetTowerName == "" && repo.Current != "" {
+		targetTowerName = repo.Current
 	}
-
-	// Find or create repo entry in config
-	repo := FindOrCreateRepo(config, repoPath)
-
-	// If Tower is empty and we have a current tower, use the current tower
-	if a.Tower == "" && repo.Current != "" {
-		a.Tower = repo.Current
-	}
-	if a.Tower == "" {
-		return fmt.Errorf("no tower specified, use 'ghenga current <tower-name>' to set one")
+	if targetTowerName == "" {
+		return fmt.Errorf("no tower specified, use 'ghenga current <tower-name>' to set one or specify --tower")
 	}
 
 	// Find or create tower entry in repo
-	tower := FindOrCreateTower(repo, a.Tower)
+	tower := FindOrCreateTower(repo, targetTowerName)
 
 	// Check if branch already exists in tower
 	if ContainsBranch(tower, a.Name) {
-		return fmt.Errorf("branch '%s' already exists in tower '%s'", a.Name, a.Tower)
+		return fmt.Errorf("branch '%s' already exists in tower '%s'", a.Name, targetTowerName)
 	}
 
 	// Open the repository
-	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
+	r, err := openGitRepo()
 	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+		return err
 	}
 
 	// Verify the branch to add exists
@@ -490,33 +383,10 @@ type RmCmd struct {
 }
 
 func (r *RmCmd) Run(_ *kong.Context) error {
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	// Load config, repo, and current tower
+	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
-	}
-
-	// Load configuration
-	config, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	// Find repo entry in config
-	repo := FindRepoByPath(config, repoPath)
-	if repo == nil {
-		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
-	}
-
-	// Check if a current tower is set
-	if repo.Current == "" {
-		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
-	}
-
-	// Get current tower
-	currentTower := FindTowerByName(repo, repo.Current)
-	if currentTower == nil {
-		return fmt.Errorf("current tower '%s' not found", repo.Current)
+		return err
 	}
 
 	// Check if branch exists in tower
@@ -549,7 +419,7 @@ type InitCmd struct {
 }
 
 func (i *InitCmd) Run(_ *kong.Context) error {
-	// Get the repository path
+	// Get the repository path first
 	repoPath, err := GetCurrentRepository()
 	if err != nil {
 		return fmt.Errorf("failed to get current repository: %w", err)
@@ -574,12 +444,15 @@ func (i *InitCmd) Run(_ *kong.Context) error {
 	// Create default tower
 	tower := FindOrCreateTower(repo, i.DefaultTower)
 
+	// Set default tower as current
+	repo.Current = tower.Name
+
 	// Save configuration
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
 
-	fmt.Printf("Initialized repository at '%s' with tower '%s'\n", repoPath, tower.Name)
+	fmt.Printf("Initialized repository at '%s' with tower '%s' and set it as current\n", repoPath, tower.Name)
 	return nil
 }
 
@@ -588,35 +461,21 @@ type NewCmd struct {
 }
 
 func (n *NewCmd) Run(_ *kong.Context) error {
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	config, repo, repoPath, err := loadOrCreateRepoConfig()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
+		return err
 	}
 
-	// Load configuration
-	config, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	// Find or create repo entry in config
-	repo := FindOrCreateRepo(config, repoPath)
-
-	// Check if tower already exists
 	for _, tower := range repo.Towers {
 		if tower.Name == n.Name {
 			return fmt.Errorf("tower '%s' already exists in repository at '%s'", n.Name, repoPath)
 		}
 	}
 
-	// Create tower
 	tower := FindOrCreateTower(repo, n.Name)
 
-	// Set as current tower
 	repo.Current = n.Name
 
-	// Save configuration
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
@@ -630,30 +489,19 @@ type CurrentCmd struct {
 }
 
 func (c *CurrentCmd) Run(_ *kong.Context) error {
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	config, repo, repoPath, err := loadRepoConfig()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
+		// Handle the specific error where the repo is not found but config loaded
+		if repo == nil && strings.Contains(err.Error(), "not found in configuration") {
+			return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
+		}
+		return err
 	}
 
-	// Load configuration
-	config, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	// Find repo entry in config
-	repo := FindRepoByPath(config, repoPath)
-	if repo == nil {
-		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
-	}
-
-	// Set the current tower
 	if err := SetCurrentTower(repo, c.Tower); err != nil {
 		return err
 	}
 
-	// Save configuration
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
@@ -667,52 +515,21 @@ type RenameCmd struct {
 }
 
 func (r *RenameCmd) Run(_ *kong.Context) error {
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	config, repoInfo, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
+		return err
 	}
 
-	// Load configuration
-	config, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	// Find repo entry in config
-	repo := FindRepoByPath(config, repoPath)
-	if repo == nil {
-		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
-	}
-
-	// Check if a current tower is set
-	if repo.Current == "" {
-		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
-	}
-
-	// Get current tower
-	currentTower := FindTowerByName(repo, repo.Current)
-	if currentTower == nil {
-		return fmt.Errorf("current tower '%s' not found", repo.Current)
-	}
-
-	// Check if new name already exists
-	for _, tower := range repo.Towers {
+	for _, tower := range repoInfo.Towers {
 		if tower.Name == r.NewName {
 			return fmt.Errorf("tower with name '%s' already exists", r.NewName)
 		}
 	}
 
-	// Store the old name for the output message
 	oldName := currentTower.Name
-
-	// Update the tower name
 	currentTower.Name = r.NewName
+	repoInfo.Current = r.NewName
 
-	// Update the current tower reference
-	repo.Current = r.NewName
-
-	// Save configuration
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
@@ -726,53 +543,23 @@ type BaseCmd struct {
 }
 
 func (b *BaseCmd) Run(_ *kong.Context) error {
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
+		return err
 	}
 
-	// Load configuration
-	config, err := LoadConfig()
+	r, err := openGitRepo()
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return err
 	}
 
-	// Find repo entry in config
-	repo := FindRepoByPath(config, repoPath)
-	if repo == nil {
-		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
-	}
-
-	// Check if a current tower is set
-	if repo.Current == "" {
-		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
-	}
-
-	// Get current tower
-	currentTower := FindTowerByName(repo, repo.Current)
-	if currentTower == nil {
-		return fmt.Errorf("current tower '%s' not found", repo.Current)
-	}
-
-	// Open the git repository to validate the commit exists
-	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-
-	// Try to resolve the commit reference
 	hash, err := r.ResolveRevision(plumbing.Revision(b.Commit))
 	if err != nil {
 		return fmt.Errorf("failed to resolve commit '%s': %w", b.Commit, err)
 	}
 
-	// Set the base commit for the tower
 	currentTower.Base = hash.String()
 
-	// Save configuration
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
@@ -786,25 +573,15 @@ type RmTowerCmd struct {
 }
 
 func (r *RmTowerCmd) Run(_ *kong.Context) error {
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	config, repo, repoPath, err := loadRepoConfig()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
+		// Handle the specific error where the repo is not found but config loaded
+		if repo == nil && strings.Contains(err.Error(), "not found in configuration") {
+			return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
+		}
+		return err
 	}
 
-	// Load configuration
-	config, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	// Find repo entry in config
-	repo := FindRepoByPath(config, repoPath)
-	if repo == nil {
-		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
-	}
-
-	// Find the tower in the repository
 	towerIndex := -1
 	for i, tower := range repo.Towers {
 		if tower.Name == r.Name {
@@ -817,47 +594,37 @@ func (r *RmTowerCmd) Run(_ *kong.Context) error {
 		return fmt.Errorf("tower '%s' not found in repository", r.Name)
 	}
 
-	// Check if this is the current tower
 	isCurrent := repo.Current == r.Name
 
-	// Create a red color for the warning
 	warningColor := color.New(color.FgRed).Add(color.Bold)
 
-	// Display warning and prompt for confirmation
 	if isCurrent {
 		warningColor.Printf("WARNING: You are about to remove the current tower '%s'!\n", r.Name)
 	} else {
 		warningColor.Printf("WARNING: You are about to remove tower '%s'!\n", r.Name)
 	}
 
-	// Show branch count
 	branchCount := len(repo.Towers[towerIndex].Branches)
 	if branchCount > 0 {
 		warningColor.Printf("This tower contains %d branch(es). The branches will still exist, but the tower that tracks them will be removed.\n", branchCount)
 	}
 
-	// Prompt for confirmation
 	fmt.Print("Are you sure you want to continue? [y/N]: ")
 
-	// Read response
 	var response string
 	fmt.Scanln(&response)
 
-	// Check if user confirmed
 	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
 		fmt.Println("Operation cancelled.")
 		return nil
 	}
 
-	// Remove the tower from the repository
 	repo.Towers = slices.Delete(repo.Towers, towerIndex, towerIndex+1)
 
-	// If we removed the current tower, unset current
 	if isCurrent {
 		repo.Current = ""
 	}
 
-	// Save configuration
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
@@ -879,7 +646,6 @@ type RebaseDoCmd struct {
 }
 
 func (r *RebaseDoCmd) Run(_ *kong.Context) error {
-	// Check if working directory is clean. If not, return error.
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	output, err := statusCmd.Output()
 	if err != nil {
@@ -890,44 +656,16 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before rebasing")
 	}
 
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	config, _, currentTower, _, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
+		return err
 	}
 
-	// Load configuration
-	config, err := LoadConfig()
+	gitRepo, err := openGitRepo()
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return err
 	}
 
-	// Find repo entry in config
-	repo := FindRepoByPath(config, repoPath)
-	if repo == nil {
-		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
-	}
-
-	// Check if a current tower is set
-	if repo.Current == "" {
-		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
-	}
-
-	// Get current tower
-	currentTower := FindTowerByName(repo, repo.Current)
-	if currentTower == nil {
-		return fmt.Errorf("current tower '%s' not found", repo.Current)
-	}
-
-	// Open the repository
-	gitRepo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-
-	// Store current timestamp for the rebase operation
 	currentTime := time.Now().Format(time.RFC3339)
 	currentTower.LastRebased = currentTime
 
@@ -943,7 +681,6 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		branch.LastReflogID = branchRef.Hash().String()
 	}
 
-	// Save the configuration with the updated reflog hashes
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration with branch states: %w", err)
 	}
@@ -971,7 +708,6 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		branch := currentTower.Branches[i]
 		baseBranch := currentTower.Branches[i-1]
 
-		// Get branch references
 		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
 		branchHead, err := gitRepo.Reference(branchRefName, true)
 		if err != nil {
@@ -986,14 +722,13 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 			continue
 		}
 
-		// Find the merge base (common ancestor)
+		// Find common ancestor
 		mergeBase, err := findMergeBase(gitRepo, branchHead.Hash(), baseHead.Hash())
 		if err != nil {
 			return fmt.Errorf("failed to find merge base between '%s' and '%s': %w", branch.Name, baseBranch.Name, err)
 		}
 
-		// Create a DivergedBranch entry
-		db := BranchInfo{
+		branchInfo := BranchInfo{
 			Index:          i,
 			Name:           branch.Name,
 			BaseBranchName: baseBranch.Name,
@@ -1001,7 +736,6 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 			IsDiverged:     mergeBase != baseHead.Hash(),
 		}
 
-		// Collect the unique commits
 		// Use git rev-list to find unique commits
 		cmd := exec.Command("git", "rev-list", "--reverse", baseHead.Hash().String()+".."+branchHead.Hash().String())
 		output, err := cmd.Output()
@@ -1009,64 +743,55 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 			return fmt.Errorf("failed to list unique commits for '%s': %w", branch.Name, err)
 		}
 
-		// Parse the commit hashes
 		commits := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(commits) > 0 && commits[0] != "" {
-			db.UniqueCommits = commits
+			branchInfo.UniqueCommits = commits
 		}
 
-		branchInfos = append(branchInfos, db)
+		branchInfos = append(branchInfos, branchInfo)
 	}
 
 	// Keep every branch after (and including) the first diverged branch
-	var realDivergedBranches []BranchInfo
+	var divergedBranches []BranchInfo
 	for i := range branchInfos {
 		if branchInfos[i].IsDiverged {
-			realDivergedBranches = branchInfos[i:]
+			divergedBranches = branchInfos[i:]
 			break
 		}
 	}
 
-	// If no diverged branches found, exit early
-	if len(realDivergedBranches) == 0 {
+	if len(divergedBranches) == 0 {
 		fmt.Println("No diverged branches found in the current tower. All branches are up to date.")
 		return nil
 	}
 
-	// Create color formatters
 	branchColor := color.New(color.FgYellow)
 	warningColor := color.New(color.FgRed).Add(color.Bold)
 
-	// Print information about diverged branches and ask for confirmation
-	fmt.Printf("Found %d diverged branch(es) in tower '%s':\n", len(realDivergedBranches), currentTower.Name)
-	for _, db := range realDivergedBranches {
+	fmt.Printf("Found %d diverged branch(es) in tower '%s':\n", len(divergedBranches), currentTower.Name)
+	for _, db := range divergedBranches {
 		branchColor.Printf("  %s (based on %s) - %d unique commits\n",
 			db.Name, db.BaseBranchName, len(db.UniqueCommits))
 	}
 
-	// Show warning about rebase
 	warningColor.Println("\nWARNING: Rebasing will change commit hashes and you will need to force-push to remote branches if they exist.")
 	warningColor.Println("Make sure you understand the implications of rebasing published branches.")
 	fmt.Println("You may undo the rebase with 'ghenga rebase undo' if you make a mistake.")
 
-	// Prompt for confirmation
 	fmt.Print("\nDo you want to proceed with rebasing these branches? [y/N]: ")
 
-	// Read response
 	var response string
 	fmt.Scanln(&response)
 
-	// Check if user confirmed
 	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
 		fmt.Println("Rebase operation cancelled.")
 		return nil
 	}
 
 	// Second pass: perform rebases
-	for _, db := range realDivergedBranches {
+	for _, db := range divergedBranches {
 		fmt.Printf("Rebasing '%s' onto '%s'...\n", db.Name, db.BaseBranchName)
 
-		// If there are no unique commits, skip
 		if len(db.UniqueCommits) == 0 {
 			fmt.Printf("No unique commits found for '%s', skipping\n", db.Name)
 			continue
@@ -1074,8 +799,6 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 
 		// Checkout the base branch
 		checkoutBaseCmd := exec.Command("git", "checkout", db.BaseBranchName)
-		checkoutBaseCmd.Stdout = os.Stdout
-		checkoutBaseCmd.Stderr = os.Stderr
 		if err := checkoutBaseCmd.Run(); err != nil {
 			return fmt.Errorf("failed to checkout base branch '%s': %w", db.BaseBranchName, err)
 		}
@@ -1083,8 +806,6 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		// Create and checkout a temporary branch
 		tempBranch := fmt.Sprintf("temp-rebase-%s", db.Name)
 		createTempCmd := exec.Command("git", "checkout", "-b", tempBranch)
-		createTempCmd.Stdout = os.Stdout
-		createTempCmd.Stderr = os.Stderr
 		if err := createTempCmd.Run(); err != nil {
 			return fmt.Errorf("failed to create temporary branch: %w", err)
 		}
@@ -1092,8 +813,6 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		// Cherry-pick each unique commit onto the temporary branch
 		for _, commit := range db.UniqueCommits {
 			cherryPickCmd := exec.Command("git", "cherry-pick", commit)
-			cherryPickCmd.Stdout = os.Stdout
-			cherryPickCmd.Stderr = os.Stderr
 			if err := cherryPickCmd.Run(); err != nil {
 				// Clean up by deleting the temporary branch
 				deleteTempCmd := exec.Command("git", "checkout", originalBranch)
@@ -1107,24 +826,18 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 
 		// Force-update the original branch to point to our temporary branch
 		forceUpdateCmd := exec.Command("git", "branch", "-f", db.Name, tempBranch)
-		forceUpdateCmd.Stdout = os.Stdout
-		forceUpdateCmd.Stderr = os.Stderr
 		if err := forceUpdateCmd.Run(); err != nil {
 			return fmt.Errorf("failed to update branch '%s': %w", db.Name, err)
 		}
 
 		// Checkout the updated branch
 		checkoutUpdatedCmd := exec.Command("git", "checkout", db.Name)
-		checkoutUpdatedCmd.Stdout = os.Stdout
-		checkoutUpdatedCmd.Stderr = os.Stderr
 		if err := checkoutUpdatedCmd.Run(); err != nil {
 			return fmt.Errorf("failed to checkout updated branch '%s': %w", db.Name, err)
 		}
 
 		// Delete the temporary branch
 		deleteTempCmd := exec.Command("git", "branch", "-D", tempBranch)
-		deleteTempCmd.Stdout = os.Stdout
-		deleteTempCmd.Stderr = os.Stderr
 		if err := deleteTempCmd.Run(); err != nil {
 			fmt.Printf("Warning: Failed to delete temporary branch '%s'\n", tempBranch)
 		}
@@ -1134,8 +847,6 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 
 	// Restore the original branch
 	checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
-	checkoutOriginalCmd.Stdout = os.Stdout
-	checkoutOriginalCmd.Stderr = os.Stderr
 	if err := checkoutOriginalCmd.Run(); err != nil {
 		fmt.Printf("Warning: Failed to checkout original branch '%s'\n", originalBranch)
 	}
@@ -1148,41 +859,15 @@ type RebaseUndoCmd struct {
 }
 
 func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
-	// Get the repository path
-	repoPath, err := GetCurrentRepository()
+	config, _, currentTower, _, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
-		return fmt.Errorf("failed to get current repository: %w", err)
+		return err
 	}
 
-	// Load configuration
-	config, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	// Find repo entry in config
-	repo := FindRepoByPath(config, repoPath)
-	if repo == nil {
-		return fmt.Errorf("repository at '%s' not found in configuration", repoPath)
-	}
-
-	// Check if a current tower is set
-	if repo.Current == "" {
-		return fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
-	}
-
-	// Get current tower
-	currentTower := FindTowerByName(repo, repo.Current)
-	if currentTower == nil {
-		return fmt.Errorf("current tower '%s' not found", repo.Current)
-	}
-
-	// Check if there's a stored rebase timestamp
 	if currentTower.LastRebased == "" {
 		return fmt.Errorf("no previous rebase found for tower '%s'", currentTower.Name)
 	}
 
-	// Check if any branches have stored reflog IDs
 	branchesToRestore := 0
 	for _, branch := range currentTower.Branches {
 		if branch.LastReflogID != "" {
@@ -1194,31 +879,23 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 		return fmt.Errorf("no branch states found to restore in tower '%s'", currentTower.Name)
 	}
 
-	// Open the repository
-	gitRepo, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
+	gitRepo, err := openGitRepo()
 	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+		return err
 	}
 
-	// Create color formatters
 	warningColor := color.New(color.FgRed).Add(color.Bold)
 
-	// Show warning about undo
 	warningColor.Println("\nWARNING: Undoing a rebase will reset your branches to their previous state.")
 	warningColor.Printf("This will restore %d branches to their state before the rebase on %s.\n",
 		branchesToRestore, currentTower.LastRebased)
 	warningColor.Println("Any changes made after the rebase will be lost.")
 
-	// Prompt for confirmation
 	fmt.Print("\nDo you want to proceed with undoing the last rebase? [y/N]: ")
 
-	// Read response
 	var response string
 	fmt.Scanln(&response)
 
-	// Check if user confirmed
 	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
 		fmt.Println("Undo operation cancelled.")
 		return nil
@@ -1235,31 +912,23 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 	for i := len(currentTower.Branches) - 1; i >= 0; i-- {
 		branch := &currentTower.Branches[i]
 
-		// Skip branches without a stored reflog ID
 		if branch.LastReflogID == "" {
 			continue
 		}
 
-		// Try to restore the branch
 		fmt.Printf("Attempting to restore branch '%s'...\n", branch.Name)
 
-		// Check if branch exists
 		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
 		_, err := gitRepo.Reference(branchRefName, true)
 		branchExists := err == nil
 
-		// Reset the branch to its stored state
 		var cmd *exec.Cmd
 		if branchExists {
-			// Force-reset an existing branch
 			cmd = exec.Command("git", "update-ref", branchRefName.String(), branch.LastReflogID)
 		} else {
-			// Create a new branch at the stored commit point
 			cmd = exec.Command("git", "branch", branch.Name, branch.LastReflogID)
 		}
 
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("Warning: Failed to restore branch '%s'\n", branch.Name)
 		} else {
@@ -1269,18 +938,13 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 		}
 	}
 
-	// Clear the stored rebase timestamp
 	currentTower.LastRebased = ""
 
-	// Save the configuration with cleared reflog IDs
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to update configuration: %w", err)
 	}
 
-	// Restore the original branch
 	checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
-	checkoutOriginalCmd.Stdout = os.Stdout
-	checkoutOriginalCmd.Stderr = os.Stderr
 	if err := checkoutOriginalCmd.Run(); err != nil {
 		fmt.Printf("Warning: Failed to checkout original branch '%s'\n", originalBranch)
 	}

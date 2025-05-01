@@ -176,7 +176,7 @@ func TestRebaseCommand(t *testing.T) {
 
 	// Setup tower in the configuration
 	config := &Config{
-		Repos: []*Repo{
+		Repos: []*RepoInfo{
 			{
 				Path:    tempDir,
 				Current: "test-tower",

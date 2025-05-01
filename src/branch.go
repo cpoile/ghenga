@@ -27,7 +27,7 @@ func GetCurrentRepository() (string, error) {
 }
 
 // FindTowerByName finds a tower by name in the given repository configuration
-func FindTowerByName(repo *Repo, towerName string) *Tower {
+func FindTowerByName(repo *RepoInfo, towerName string) *Tower {
 	for _, tower := range repo.Towers {
 		if tower.Name == towerName {
 			return tower
@@ -37,7 +37,7 @@ func FindTowerByName(repo *Repo, towerName string) *Tower {
 }
 
 // FindOrCreateTower finds a tower by name or creates it if it doesn't exist
-func FindOrCreateTower(repo *Repo, towerName string) *Tower {
+func FindOrCreateTower(repo *RepoInfo, towerName string) *Tower {
 	tower := FindTowerByName(repo, towerName)
 	if tower == nil {
 		tower = &Tower{
@@ -50,7 +50,7 @@ func FindOrCreateTower(repo *Repo, towerName string) *Tower {
 }
 
 // FindRepoByPath finds a repository configuration by path
-func FindRepoByPath(config *Config, repoPath string) *Repo {
+func FindRepoByPath(config *Config, repoPath string) *RepoInfo {
 	// Try to find the repo by exact path
 	for _, repo := range config.Repos {
 		if repo.Path == repoPath {
@@ -78,10 +78,10 @@ func FindRepoByPath(config *Config, repoPath string) *Repo {
 }
 
 // FindOrCreateRepo finds a repository configuration by path or creates it if it doesn't exist
-func FindOrCreateRepo(config *Config, repoPath string) *Repo {
+func FindOrCreateRepo(config *Config, repoPath string) *RepoInfo {
 	repo := FindRepoByPath(config, repoPath)
 	if repo == nil {
-		repo = &Repo{
+		repo = &RepoInfo{
 			Path:   repoPath,
 			Towers: []*Tower{},
 		}
@@ -101,7 +101,7 @@ func ContainsBranch(tower *Tower, branchName string) bool {
 }
 
 // SetCurrentTower sets the current tower for a repository
-func SetCurrentTower(repo *Repo, towerName string) error {
+func SetCurrentTower(repo *RepoInfo, towerName string) error {
 	// Check if the tower exists
 	tower := FindTowerByName(repo, towerName)
 	if tower == nil {
@@ -115,7 +115,7 @@ func SetCurrentTower(repo *Repo, towerName string) error {
 
 // GetCurrentTower gets the current tower for a repository
 // If no current tower is set, returns the first tower or nil if no towers exist
-func GetCurrentTower(repo *Repo) *Tower {
+func GetCurrentTower(repo *RepoInfo) *Tower {
 	if repo.Current != "" {
 		tower := FindTowerByName(repo, repo.Current)
 		if tower != nil {

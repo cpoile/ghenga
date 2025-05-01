@@ -23,7 +23,7 @@ func TestBranchAddCommand(t *testing.T) {
 	// Provide two inputs for the two new towers created
 	go func() {
 		defer w.Close() // Close writer after writing
-		io.WriteString(w, "1\n1\n")
+		_, _ = io.WriteString(w, "1\n1\n")
 	}()
 	os.Stdin = r // Assign the reader end to os.Stdin
 
