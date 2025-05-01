@@ -22,11 +22,12 @@ type RepoInfo struct {
 
 // Tower represents a stack of branches
 type Tower struct {
-	Name        string   `toml:"name"`
-	Base        string   `toml:"base"`
-	Branches    []Branch `toml:"branches"`
-	LastRebased string   `toml:"last_rebased,omitempty"` // Timestamp of the last rebase operation
-	LastSynced  string   `toml:"last_synced,omitempty"`  // Timestamp of last sync
+	Name        string       `toml:"name"`
+	Base        string       `toml:"base"`
+	Branches    []Branch     `toml:"branches"`
+	LastRebased string       `toml:"last_rebased,omitempty"` // Timestamp of the last rebase operation
+	LastSynced  string       `toml:"last_synced,omitempty"`  // Timestamp of last sync
+	RebaseState *RebaseState `toml:"rebaseState,omitempty"`  // Stores state if a rebase is paused
 }
 
 // Branch represents a git branch
@@ -34,6 +35,25 @@ type Branch struct {
 	Name            string `toml:"name"`
 	LastReflogID    string `toml:"last_reflog_id,omitempty"`     // Stores the commit hash before last rebase for undo operations
 	PreSyncReflogID string `toml:"pre_sync_reflog_id,omitempty"` // Used for sync undo
+}
+
+// Minimal info needed to restart rebase for a branch
+type BranchRebaseInfo struct {
+	Name           string   `toml:"name"`
+	BaseBranchName string   `toml:"baseBranchName"`
+	UniqueCommits  []string `toml:"uniqueCommits"`
+}
+
+// RebaseState stores the necessary information to resume a paused rebase operation
+type RebaseState struct {
+	IsInProgress         bool               `toml:"isInProgress"`
+	TargetBranch         string             `toml:"targetBranch"`         // Branch currently being rebased
+	BaseBranch           string             `toml:"baseBranch"`           // Base for the current target
+	TemporaryBranch      string             `toml:"temporaryBranch"`      // Temp branch holding picks
+	CurrentCommitIndex   int                `toml:"currentCommitIndex"`   // Index in RemainingCommits that failed or is next
+	RemainingCommits     []string           `toml:"remainingCommits"`     // Commits for the TargetBranch
+	OriginalBranch       string             `toml:"originalBranch"`       // Branch to return to upon completion
+	RemainingBranchInfos []BranchRebaseInfo `toml:"remainingBranchInfos"` // Info for branches yet to be processed (including current one if paused)
 }
 
 // ConfigPathFunc is a function type that returns the path to the config file
