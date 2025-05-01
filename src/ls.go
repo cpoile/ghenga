@@ -44,7 +44,6 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 	towerColor := color.New(color.FgBlue).Add(color.Bold)
 	branchColor := color.New(color.FgYellow)
 	statusColor := color.New(color.FgMagenta)
-	commitColor := color.New(color.FgWhite)
 	baseCommitColor := color.New(color.FgCyan)
 	divergedColor := color.New(color.FgRed).Add(color.Bold)
 	warningColor := color.New(color.FgYellow).Add(color.Bold)
@@ -79,12 +78,13 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 		// TODO: need to rename "base branch" to something else, confusing with "base"
 		// Check if the tower base branch exists
 		if len(tower.Branches) > 0 {
-			baseBranchName := tower.Branches[0].Name
-			baseBranchRefName := plumbing.NewBranchReferenceName(baseBranchName)
-			_, err := r.Reference(baseBranchRefName, true)
+			bottomBranch := tower.Branches[0].Name
+			bottomBranchRefName := plumbing.NewBranchReferenceName(bottomBranch)
+			// TODO: need to check remote, not local
+			_, err := r.Reference(bottomBranchRefName, true)
 			if err != nil && errors.Is(err, plumbing.ErrReferenceNotFound) {
-				warningColor.Println("  ⚠️ Warning: The base branch is no longer valid -- if it has been merged upstream,")
-				warningColor.Println("           you need to run 'ghenga land' to mark the base branch as merged.")
+				warningColor.Println("  ⚠️ Warning: The bottom branch is no longer valid -- if it has been merged upstream,")
+				warningColor.Println("           you need to run 'ghenga land' to mark the bottom branch as merged.")
 				warningColor.Println("           The rest of the tower will then be rebased.")
 			}
 		}
@@ -105,6 +105,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 				// Resolve the first branch of the tower
 				firstTowerBranch := tower.Branches[0]
 				firstTowerBranchRef, errFirst := r.Reference(plumbing.NewBranchReferenceName(firstTowerBranch.Name), true)
+				fmt.Printf("bottomBranch: %s, bottomBranchRef: %s, baseBranch: %s, baseBranchRef: %s\n", firstTowerBranch, firstTowerBranchRef, tower.Base, baseBranchRef)
 				if errFirst != nil {
 					warningColor.Printf("  ⚠️ Could not resolve first tower branch '%s': %v\n", firstTowerBranch.Name, errFirst)
 					baseCalculationFailed = true
@@ -115,6 +116,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 						warningColor.Printf("  ⚠️ Could not find merge base between '%s' and '%s': %v\n", firstTowerBranch.Name, tower.Base, errMerge)
 						baseCalculationFailed = true
 					} else {
+						fmt.Printf("mergeBaseHash: %s\n", mergeBaseHash)
 						calculatedBaseCommit = mergeBaseHash
 					}
 				}
@@ -208,7 +210,10 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 			}
 
 			// Display commits
-			commitIter, err := r.Log(&git.LogOptions{From: branchRef.Hash()})
+			commitIter, err := r.Log(&git.LogOptions{
+				From:  branchRef.Hash(),
+				Order: git.LogOrderCommitterTime,
+			})
 			if err != nil {
 				continue
 			}
@@ -254,7 +259,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 					// TODO: test this
 					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
 				} else {
-					commitColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
+					fmt.Printf("    %s %s\n", commit.Hash.String()[:7], message)
 				}
 			}
 

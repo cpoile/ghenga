@@ -735,5 +735,5 @@ func TestLsCmd_BaseBranchMissingWarning(t *testing.T) {
 	output := runLsCommandWithConfig(t, config, &LsCmd{})
 
 	// Verify output contains the warning
-	assert.Contains(t, output, "⚠️ Warning: The base branch is no longer valid")
+	assert.Contains(t, output, "⚠️ Warning: The bottom branch is no longer valid")
 }
