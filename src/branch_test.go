@@ -365,7 +365,7 @@ func TestBranchRemoveCommand(t *testing.T) {
 	}
 
 	repo1 := config.Repos[0]
-	testTower := FindTowerByName(repo1, "test-tower")
+	testTower := findTowerByName(repo1, "test-tower")
 	if testTower == nil {
 		t.Fatalf("Could not find test-tower")
 	}
@@ -388,7 +388,7 @@ func TestBranchRemoveCommand(t *testing.T) {
 		t.Fatalf("Failed to load config after remove: %v", err)
 	}
 	repo1 = config.Repos[0]
-	testTower = FindTowerByName(repo1, "test-tower")
+	testTower = findTowerByName(repo1, "test-tower")
 
 	if len(testTower.Branches) != 2 {
 		t.Fatalf("Expected 2 branches after removal, got %d", len(testTower.Branches))
@@ -457,13 +457,13 @@ func TestBranchRemoveCommand(t *testing.T) {
 	repo1 = config.Repos[0]
 
 	// Original tower should still have 2 branches
-	testTower = FindTowerByName(repo1, "test-tower")
+	testTower = findTowerByName(repo1, "test-tower")
 	if len(testTower.Branches) != 2 {
 		t.Errorf("Expected test-tower to still have 2 branches, got %d", len(testTower.Branches))
 	}
 
 	// New tower should have 0 branches
-	anotherTower := FindTowerByName(repo1, "another-tower")
+	anotherTower := findTowerByName(repo1, "another-tower")
 	if len(anotherTower.Branches) != 0 {
 		t.Errorf("Expected another-tower to have 0 branches after removal, got %d", len(anotherTower.Branches))
 	}
@@ -624,12 +624,12 @@ func TestBranchAddToCurrent(t *testing.T) {
 	repo1 := config.Repos[0]
 
 	// Get both towers
-	defaultTower := FindTowerByName(repo1, "default-tower")
+	defaultTower := findTowerByName(repo1, "default-tower")
 	if defaultTower == nil {
 		t.Fatalf("Could not find default-tower")
 	}
 
-	secondTower := FindTowerByName(repo1, "second-tower")
+	secondTower := findTowerByName(repo1, "second-tower")
 	if secondTower == nil {
 		t.Fatalf("Could not find second-tower")
 	}

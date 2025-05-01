@@ -13,7 +13,7 @@ type Config struct {
 	Repos []*RepoInfo `toml:"repos"`
 }
 
-// RepoInfo represents a git repository configuration
+// RepoInfo represents Ghenga's git repository configuration
 type RepoInfo struct {
 	Path    string   `toml:"path"`
 	Current string   `toml:"current"`
@@ -63,9 +63,7 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
-	// Check if config file exists
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
-		// Create default config if it doesn't exist
 		defaultConfig := &Config{
 			Repos: []*RepoInfo{},
 		}
@@ -75,7 +73,6 @@ func LoadConfig() (*Config, error) {
 		return defaultConfig, nil
 	}
 
-	// Read and parse config file
 	var config Config
 	_, err = toml.DecodeFile(configPath, &config)
 	if err != nil {
@@ -92,14 +89,12 @@ func SaveConfig(config *Config) error {
 		return err
 	}
 
-	// Create the file
 	file, err := os.Create(configPath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	// Encode config to TOML and write to file
 	encoder := toml.NewEncoder(file)
 	return encoder.Encode(config)
 }

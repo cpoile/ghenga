@@ -2,17 +2,123 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
+// getCurrentRepository returns the path of the current git repository
+func getCurrentRepository() (string, error) {
+	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
+		DetectDotGit: true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	wt, err := r.Worktree()
+	if err != nil {
+		return "", fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	return wt.Filesystem.Root(), nil
+}
+
+// findTowerByName finds a tower by name in the given repository configuration
+func findTowerByName(repo *RepoInfo, towerName string) *Tower {
+	for _, tower := range repo.Towers {
+		if tower.Name == towerName {
+			return tower
+		}
+	}
+	return nil
+}
+
+// findOrCreateTower finds a tower by name or creates it if it doesn't exist
+func findOrCreateTower(repo *RepoInfo, towerName string) *Tower {
+	tower := findTowerByName(repo, towerName)
+	if tower == nil {
+		tower = &Tower{
+			Name:     towerName,
+			Branches: []Branch{},
+		}
+		repo.Towers = append(repo.Towers, tower)
+	}
+	return tower
+}
+
+// getCurrentTower retrieves the current tower based on the repository's current setting.
+func getCurrentTower(repo *RepoInfo) (*Tower, error) {
+	if repo.Current == "" {
+		return nil, fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
+	}
+	currentTower := findTowerByName(repo, repo.Current)
+	if currentTower == nil {
+		// This case should ideally not happen if repo.Current is set correctly,
+		// but good to handle defensively.
+		return nil, fmt.Errorf("current tower '%s' referenced but not found", repo.Current)
+	}
+	return currentTower, nil
+}
+
+// findRepoByPath finds a repository configuration by path
+func findRepoByPath(config *Config, repoPath string) *RepoInfo {
+	// Try to find the repo by exact path
+	for _, repo := range config.Repos {
+		if repo.Path == repoPath {
+			return repo
+		}
+	}
+
+	// Try to find the repo by normalized path (resolving symlinks)
+	normalizedPath, err := filepath.EvalSymlinks(repoPath)
+	if err != nil {
+		return nil
+	}
+
+	for _, repo := range config.Repos {
+		normalizedRepoPath, err := filepath.EvalSymlinks(repo.Path)
+		if err != nil {
+			continue
+		}
+		if normalizedRepoPath == normalizedPath {
+			return repo
+		}
+	}
+
+	return nil
+}
+
+// findOrCreateRepo finds a repository configuration by path or creates it if it doesn't exist
+func findOrCreateRepo(config *Config, repoPath string) *RepoInfo {
+	repo := findRepoByPath(config, repoPath)
+	if repo == nil {
+		repo = &RepoInfo{
+			Path:   repoPath,
+			Towers: []*Tower{},
+		}
+		config.Repos = append(config.Repos, repo)
+	}
+	return repo
+}
+
+// containsBranch checks if a tower contains a branch with the given name
+func containsBranch(tower *Tower, branchName string) bool {
+	for _, branch := range tower.Branches {
+		if branch.Name == branchName {
+			return true
+		}
+	}
+	return false
+}
+
 // loadRepoConfig gets the current repository path, loads the configuration,
 // and finds the repository entry in the config. It returns an error if the
 // repository is not found in the config.
 func loadRepoConfig() (*Config, *RepoInfo, string, error) {
-	repoPath, err := GetCurrentRepository()
+	repoPath, err := getCurrentRepository()
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to get current repository: %w", err)
 	}
@@ -22,7 +128,7 @@ func loadRepoConfig() (*Config, *RepoInfo, string, error) {
 		return nil, nil, repoPath, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	repo := FindRepoByPath(config, repoPath)
+	repo := findRepoByPath(config, repoPath)
 	if repo == nil {
 		return config, nil, repoPath, fmt.Errorf("repository at '%s' not found in configuration. Run 'ghenga init'?", repoPath)
 	}
@@ -33,7 +139,7 @@ func loadRepoConfig() (*Config, *RepoInfo, string, error) {
 // loadOrCreateRepoConfig behaves like loadRepoConfig but creates the repository
 // entry if it doesn't exist.
 func loadOrCreateRepoConfig() (*Config, *RepoInfo, string, error) {
-	repoPath, err := GetCurrentRepository()
+	repoPath, err := getCurrentRepository()
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to get current repository: %w", err)
 	}
@@ -43,23 +149,9 @@ func loadOrCreateRepoConfig() (*Config, *RepoInfo, string, error) {
 		return nil, nil, repoPath, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	repo := FindOrCreateRepo(config, repoPath)
+	repo := findOrCreateRepo(config, repoPath)
 
 	return config, repo, repoPath, nil
-}
-
-// getCurrentTower retrieves the current tower based on the repository's current setting.
-func getCurrentTower(repo *RepoInfo) (*Tower, error) {
-	if repo.Current == "" {
-		return nil, fmt.Errorf("no current tower set, use 'ghenga current <tower-name>' to set one")
-	}
-	currentTower := FindTowerByName(repo, repo.Current)
-	if currentTower == nil {
-		// This case should ideally not happen if repo.Current is set correctly,
-		// but good to handle defensively.
-		return nil, fmt.Errorf("current tower '%s' referenced but not found", repo.Current)
-	}
-	return currentTower, nil
 }
 
 // loadRepoInfoAndCurrentTower loads the config, finds the repo info, and gets the current tower.

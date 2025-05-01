@@ -11,6 +11,8 @@ import (
 	"github.com/posener/complete"
 )
 
+const MAX_COMMITS_TO_PREDICT = 50
+
 var predictTowers = kongcompletion.WithPredictor(
 	"predictTowers",
 	TowerLister{},
@@ -24,12 +26,12 @@ func (l TowerLister) Predict(args complete.Args) []string {
 		return nil
 	}
 
-	repoPath, err := GetCurrentRepository()
+	repoPath, err := getCurrentRepository()
 	if err != nil {
 		return nil
 	}
 
-	repo := FindRepoByPath(config, repoPath)
+	repo := findRepoByPath(config, repoPath)
 	if repo == nil {
 		return nil
 	}
@@ -55,36 +57,30 @@ var predictTowerBranches = kongcompletion.WithPredictor(
 type TowerBranchLister struct{}
 
 func (l TowerBranchLister) Predict(args complete.Args) []string {
-	// Get current repository path
-	repoPath, err := GetCurrentRepository()
+	repoPath, err := getCurrentRepository()
 	if err != nil {
 		return nil
 	}
 
-	// Load configuration
 	config, err := LoadConfig()
 	if err != nil {
 		return nil
 	}
 
-	// Find repo in config
-	repo := FindRepoByPath(config, repoPath)
+	repo := findRepoByPath(config, repoPath)
 	if repo == nil {
 		return nil
 	}
 
-	// Get current tower
 	var currentTower *Tower
 	if repo.Current != "" {
-		currentTower = FindTowerByName(repo, repo.Current)
+		currentTower = findTowerByName(repo, repo.Current)
 	}
 
-	// If no current tower, return empty list
 	if currentTower == nil {
 		return nil
 	}
 
-	// Get all branch names from the current tower
 	branches := make([]string, 0, len(currentTower.Branches))
 	for _, branch := range currentTower.Branches {
 		branches = append(branches, branch.Name)
@@ -96,10 +92,8 @@ func (l TowerBranchLister) Predict(args complete.Args) []string {
 type BranchLister struct{}
 
 func (l BranchLister) Predict(args complete.Args) []string {
-	// Check if git is installed
 	_, err := exec.LookPath("git")
 	if err != nil {
-		// Fall back to unsorted branch listing
 		return fallbackBranchListing()
 	}
 
@@ -107,11 +101,9 @@ func (l BranchLister) Predict(args complete.Args) []string {
 	cmd := exec.Command("git", "for-each-ref", "--sort=-committerdate", "refs/heads/", "--format=%(refname:short)")
 	output, err := cmd.Output()
 	if err != nil {
-		// Fall back to unsorted branch listing
 		return fallbackBranchListing()
 	}
 
-	// Split output into lines and filter out empty lines
 	branches := []string{}
 	for _, branch := range strings.Split(string(output), "\n") {
 		if branch != "" {
@@ -124,15 +116,11 @@ func (l BranchLister) Predict(args complete.Args) []string {
 
 // fallbackBranchListing provides branch listing without sorting if git command fails
 func fallbackBranchListing() []string {
-	// Open the repository
-	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
+	r, err := openGitRepo()
 	if err != nil {
 		return nil
 	}
 
-	// Get references
 	refs, err := r.References()
 	if err != nil {
 		return nil
@@ -157,42 +145,20 @@ var predictGitRefs = kongcompletion.WithPredictor(
 
 type GitRefLister struct{}
 
+// PredictGitRefs predicts Git references for the current repository.
 func (l GitRefLister) Predict(args complete.Args) []string {
-	// Open the repository
-	r, err := git.PlainOpenWithOptions(".", &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
+	_, _, currentTower, _, err := loadRepoInfoAndCurrentTower()
+	if err != nil {
+		return nil
+	}
+
+	r, err := openGitRepo()
 	if err != nil {
 		return nil
 	}
 
 	gitRefs := []string{}
 
-	// Get current repository path
-	repoPath, err := GetCurrentRepository()
-	if err != nil {
-		return gitRefs
-	}
-
-	// Load configuration to find current tower
-	config, err := LoadConfig()
-	if err != nil {
-		return gitRefs
-	}
-
-	// Find repo in config
-	repo := FindRepoByPath(config, repoPath)
-	if repo == nil {
-		return gitRefs
-	}
-
-	// Get current tower
-	var currentTower *Tower
-	if repo.Current != "" {
-		currentTower = FindTowerByName(repo, repo.Current)
-	}
-
-	// If no current tower or tower has no branches, try to use current HEAD
 	if currentTower == nil || len(currentTower.Branches) == 0 {
 		// Get the current HEAD reference as fallback
 		headRef, err := r.Head()
@@ -217,16 +183,14 @@ func (l GitRefLister) Predict(args complete.Args) []string {
 		seenCommits := make(map[string]bool)
 		commitCount := 0
 
-		// Process commits
 		logIter.ForEach(func(c *object.Commit) error {
-			if commitCount >= 50 {
+			if commitCount >= MAX_COMMITS_TO_PREDICT {
 				return plumbing.ErrObjectNotFound // Stop after 50 items
 			}
 
 			hash := c.Hash.String()
 			shortHash := hash[:7]
 
-			// Add the commit hash if we haven't seen it yet
 			if !seenCommits[shortHash] {
 				gitRefs = append(gitRefs, shortHash)
 				seenCommits[shortHash] = true
@@ -239,19 +203,16 @@ func (l GitRefLister) Predict(args complete.Args) []string {
 		return gitRefs
 	}
 
-	// Use the first branch in the tower
 	firstBranchName := currentTower.Branches[0].Name
 	gitRefs = append(gitRefs, firstBranchName)
 
-	// Get the branch reference
-	branchRef, err := r.Reference(plumbing.NewBranchReferenceName(firstBranchName), true)
+	firstBranchRef, err := r.Reference(plumbing.NewBranchReferenceName(firstBranchName), true)
 	if err != nil {
 		return gitRefs
 	}
 
-	// Get commits from log, starting from the first branch, ordered by recency
 	logIter, err := r.Log(&git.LogOptions{
-		From:  branchRef.Hash(),
+		From:  firstBranchRef.Hash(),
 		Order: git.LogOrderCommitterTime,
 	})
 	if err != nil {
@@ -261,16 +222,14 @@ func (l GitRefLister) Predict(args complete.Args) []string {
 	seenCommits := make(map[string]bool)
 	commitCount := 0
 
-	// Process commits
 	logIter.ForEach(func(c *object.Commit) error {
-		if commitCount >= 50 {
+		if commitCount >= MAX_COMMITS_TO_PREDICT {
 			return plumbing.ErrObjectNotFound // Stop after 50 items
 		}
 
 		hash := c.Hash.String()
 		shortHash := hash[:7]
 
-		// Add the commit hash if we haven't seen it yet
 		if !seenCommits[shortHash] {
 			gitRefs = append(gitRefs, shortHash)
 			seenCommits[shortHash] = true

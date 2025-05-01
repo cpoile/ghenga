@@ -79,7 +79,7 @@ func TestRebaseBranchSpecificSave(t *testing.T) {
 	require.NoError(t, err)
 
 	// Get the tower from config
-	tower := FindTowerByName(loadedConfig.Repos[0], towerName)
+	tower := findTowerByName(loadedConfig.Repos[0], towerName)
 	require.NotNil(t, tower, "Tower should exist in config")
 
 	// Simulate storing reflog IDs (using the commit hashes we created)
@@ -98,7 +98,7 @@ func TestRebaseBranchSpecificSave(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check that the reflog IDs were saved correctly
-	updatedTower := FindTowerByName(updatedConfig.Repos[0], towerName)
+	updatedTower := findTowerByName(updatedConfig.Repos[0], towerName)
 	require.NotNil(t, updatedTower, "Tower should exist in config")
 	assert.NotEmpty(t, updatedTower.LastRebased, "Last rebased timestamp should be set")
 
@@ -122,7 +122,7 @@ func TestRebaseBranchSpecificSave(t *testing.T) {
 	finalConfig, err := LoadConfig()
 	require.NoError(t, err)
 
-	finalTower := FindTowerByName(finalConfig.Repos[0], towerName)
+	finalTower := findTowerByName(finalConfig.Repos[0], towerName)
 	require.NotNil(t, finalTower, "Tower should exist in config")
 	assert.Empty(t, finalTower.LastRebased, "Last rebased timestamp should be cleared")
 
@@ -268,7 +268,7 @@ func TestRebaseAndUndoWithActualRepo(t *testing.T) {
 		t.Fatalf("Failed to load config: %v", err)
 	}
 
-	tower := FindTowerByName(finalConfig.Repos[0], "test-tower")
+	tower := findTowerByName(finalConfig.Repos[0], "test-tower")
 	assert.NotNil(t, tower, "Tower should exist")
 	assert.Empty(t, tower.LastRebased, "LastRebased should be cleared after undo")
 
@@ -346,7 +346,7 @@ func TestRebaseUndoRecreatesDeletedBranch(t *testing.T) {
 	// Load config to get the reflog ID stored by the rebase command
 	configAfterRebase, err := LoadConfig()
 	require.NoError(t, err)
-	towerAfterRebase := FindTowerByName(configAfterRebase.Repos[0], towerName)
+	towerAfterRebase := findTowerByName(configAfterRebase.Repos[0], towerName)
 	require.NotNil(t, towerAfterRebase)
 
 	branchToDeleTe := "middle-branch"
@@ -387,7 +387,7 @@ func TestRebaseUndoRecreatesDeletedBranch(t *testing.T) {
 	// Verify stored branch-specific reflog IDs were cleared
 	finalConfig, err := LoadConfig()
 	require.NoError(t, err)
-	tower := FindTowerByName(finalConfig.Repos[0], towerName)
+	tower := findTowerByName(finalConfig.Repos[0], towerName)
 	assert.NotNil(t, tower, "Tower should exist")
 	assert.Empty(t, tower.LastRebased, "LastRebased should be cleared after undo")
 	for _, branch := range tower.Branches {

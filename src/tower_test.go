@@ -27,7 +27,7 @@ func runTowerCommandAndGetRepo(t *testing.T, cmd KongRunnable, ctx *kong.Context
 	// Use require for fatal errors in test setup/verification steps
 	require.NoError(t, err, "Failed to load config after running command")
 
-	repoConfig := FindRepoByPath(config, repoPath)
+	repoConfig := findRepoByPath(config, repoPath)
 	require.NotNil(t, repoConfig, "Repository %s not found in config after running command", repoPath)
 
 	return repoConfig, runErr // Return the repo state *after* the command ran, and the command's error
@@ -71,7 +71,7 @@ func TestTower_NewCommand(t *testing.T) {
 	require.Len(t, repo1.Towers, 1, "Expected 1 tower initially")
 
 	// Find and verify the tower
-	featureTower := FindTowerByName(repo1, "feature-tower")
+	featureTower := findTowerByName(repo1, "feature-tower")
 	require.NotNil(t, featureTower, "Could not find feature-tower")
 
 	// Verify the tower has no branches initially
@@ -320,7 +320,7 @@ func TestTower_BaseCommand(t *testing.T) {
 	require.NoError(t, err, "Failed to run Base command")
 
 	// Verify the base commit was set
-	tower := FindTowerByName(repoConfig, towerName)
+	tower := findTowerByName(repoConfig, towerName)
 	require.NotNil(t, tower, "Tower not found in config")
 	assert.Equal(t, baseCommit, tower.Base, "Base commit should be set correctly")
 
@@ -418,14 +418,14 @@ func TestTower_RmTowerCommand(t *testing.T) {
 	// Verify the configuration was updated correctly
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
-	repoConfig := FindRepoByPath(config, repoPath)
+	repoConfig := findRepoByPath(config, repoPath)
 	require.NotNil(t, repoConfig, "Repository not found in config")
 
 	// Check that only two towers remain
 	assert.Equal(t, 2, len(repoConfig.Towers), "Expected 2 towers after removal")
 
 	// Check that the removed tower doesn't exist
-	assert.Nil(t, FindTowerByName(repoConfig, "tower-3"), "Tower 'tower-3' should no longer exist")
+	assert.Nil(t, findTowerByName(repoConfig, "tower-3"), "Tower 'tower-3' should no longer exist")
 
 	// Current tower should still be set
 	assert.Equal(t, "tower-1", repoConfig.Current, "Current tower should still be 'tower-1'")
@@ -461,12 +461,12 @@ func TestTower_RmTowerCommand(t *testing.T) {
 	// Verify the configuration was updated correctly
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
-	repoConfig = FindRepoByPath(config, repoPath)
+	repoConfig = findRepoByPath(config, repoPath)
 	require.NotNil(t, repoConfig, "Repository not found in config")
 
 	// Only one tower should remain
 	assert.Equal(t, 1, len(repoConfig.Towers), "Expected 1 tower after removing current tower")
-	assert.Nil(t, FindTowerByName(repoConfig, "tower-1"), "Tower 'tower-1' should no longer exist")
+	assert.Nil(t, findTowerByName(repoConfig, "tower-1"), "Tower 'tower-1' should no longer exist")
 
 	// Current tower reference should be empty
 	assert.Equal(t, "", repoConfig.Current, "Current tower should be unset after removing it")
@@ -500,10 +500,10 @@ func TestTower_RmTowerCommand(t *testing.T) {
 	// Verify the configuration was not changed
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
-	repoConfig = FindRepoByPath(config, repoPath)
+	repoConfig = findRepoByPath(config, repoPath)
 	require.NotNil(t, repoConfig, "Repository not found in config")
 	assert.Equal(t, 1, len(repoConfig.Towers), "Expected tower to still exist after cancellation")
-	assert.NotNil(t, FindTowerByName(repoConfig, "tower-2"), "tower-2 should still exist")
+	assert.NotNil(t, findTowerByName(repoConfig, "tower-2"), "tower-2 should still exist")
 
 	// Test 4: Try to remove a non-existent tower
 	rmNonExistentCmd := &RmTowerCmd{
@@ -542,7 +542,7 @@ func TestTower_RmTowerCommand(t *testing.T) {
 	// Verify the configuration was updated correctly
 	config, err = LoadConfig()
 	require.NoError(t, err, "Failed to load config")
-	repoConfig = FindRepoByPath(config, repoPath)
+	repoConfig = findRepoByPath(config, repoPath)
 	require.NotNil(t, repoConfig, "Repository not found in config")
 	assert.Equal(t, 0, len(repoConfig.Towers), "Expected 0 towers after removing the last tower")
 }
