@@ -16,7 +16,6 @@ type LandCmd struct {
 }
 
 func (l *LandCmd) Run(ctx *kong.Context) error {
-	// TODO: refactor this
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusOutput, err := statusCmd.Output()
 	if err != nil {
@@ -45,7 +44,6 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 	if err == nil {
 		fmt.Printf("Warning: could not determine current branch: %v\n", err)
 	}
-	// TODO: what happens when originalBranchName == currentTower.Branches[0].Name ?
 	defer func() {
 		if originalBranchName != "" {
 			fmt.Printf("\nRestoring original branch: %s\n", originalBranchName)

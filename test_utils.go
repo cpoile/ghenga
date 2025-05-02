@@ -11,6 +11,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/stretchr/testify/require"
@@ -59,6 +60,18 @@ func setupTestRepo(t *testing.T) (string, *git.Repository) {
 	// Update HEAD to point to the main branch
 	headRef := plumbing.NewSymbolicReference(plumbing.HEAD, mainBranchRef.Name())
 	err = repo.Storer.SetReference(headRef)
+	require.NoError(t, err)
+
+	return tempDir, repo
+}
+
+// setupRemoteRepo creates a bare git repository in a temporary directory to simulate a remote.
+func setupRemoteRepo(t *testing.T) (string, *git.Repository) {
+	tempDir, err := os.MkdirTemp("", "ghenga-remote-test-*")
+	require.NoError(t, err)
+
+	// Initialize a bare git repository
+	repo, err := git.PlainInit(tempDir, true) // true for bare repo
 	require.NoError(t, err)
 
 	return tempDir, repo
@@ -127,6 +140,51 @@ func setupTestEnv(t *testing.T) (string, *git.Repository, func()) {
 	}
 
 	return repoPath, repo, cleanup
+}
+
+// setupTestEnvWithRemote handles common test setup for tests needing a remote:
+// - Creates a temporary local repo.
+// - Creates a temporary bare remote repo.
+// - Configures the local repo with the remote.
+// - Changes CWD to the local repo path.
+// - Creates a temporary config file.
+// - Mocks the global ConfigPath function.
+// Returns the local repo path, local repo object, remote repo path, remote repo object, and a cleanup function.
+func setupTestEnvWithRemote(t *testing.T, remoteName string) (string, *git.Repository, string, *git.Repository, func()) {
+	t.Helper()
+
+	localRepoPath, localRepo := setupTestRepo(t)
+	remoteRepoPath, remoteRepo := setupRemoteRepo(t)
+
+	// Add the remote to the local repository
+	_, err := localRepo.CreateRemote(&config.RemoteConfig{
+		Name: remoteName,
+		URLs: []string{remoteRepoPath},
+	})
+	require.NoError(t, err)
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	err = os.Chdir(localRepoPath)
+	require.NoError(t, err)
+
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	configFilePath := configFile.Name()
+	require.NoError(t, configFile.Close())
+
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFilePath)
+
+	cleanup := func() {
+		ConfigPath = oldConfigPath
+		os.Remove(configFilePath)
+		os.Chdir(oldWd)
+		os.RemoveAll(localRepoPath)
+		os.RemoveAll(remoteRepoPath) // Clean up remote repo too
+	}
+
+	return localRepoPath, localRepo, remoteRepoPath, remoteRepo, cleanup
 }
 
 // mockedConfigPath creates a function that returns a temporary config path
