@@ -188,6 +188,9 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 		originalBranchName = headRef.Name().Short()
 	}
 
+	successColor := color.New(color.FgGreen).Add(color.Bold)
+	errorColor := color.New(color.FgRed).Add(color.Bold)
+
 	// Execute Pulls
 	if len(branchesToPull) > 0 {
 		fmt.Printf("\nExecuting pulls (fast-forward only) for %d branches...\n", len(branchesToPull))
@@ -200,7 +203,7 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 			output, err := checkoutCmd.CombinedOutput()
 			if err != nil {
 				failedPullCount++
-				fmt.Printf("    Error checking out branch '%s' before pull: %s\n    Output: %s\n", branchName, err, string(output))
+				errorColor.Printf("    Error checking out branch '%s' before pull: %s\n    Output: %s\n", branchName, err, string(output))
 				errorCount++
 				continue
 			}
@@ -213,11 +216,11 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 
 			if err != nil {
 				failedPullCount++
-				fmt.Printf("    Error pulling branch '%s': %s\n    Output: %s\n", branchName, err, pullOutput)
+				errorColor.Printf("    Error pulling branch '%s': %s\n    Output: %s\n", branchName, err, pullOutput)
 				errorCount++
 			} else {
 				successPullCount++
-				fmt.Printf("    Successfully pulled branch '%s'\n    Output: %s\n", branchName, pullOutput)
+				successColor.Printf("    Successfully pulled branch '%s'\n    Output: %s\n", branchName, pullOutput)
 			}
 		}
 	}
@@ -243,11 +246,11 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 				if errMsg == "" {
 					errMsg = err.Error()
 				}
-				fmt.Printf("    Error pushing branch '%s': %s\n", branchName, errMsg)
+				errorColor.Printf("    Error pushing branch '%s': %s\n", branchName, errMsg)
 				errorCount++
 			} else {
 				successNormalCount++
-				fmt.Printf("    Successfully pushed branch '%s'\n", branchName)
+				successColor.Printf("    Successfully pushed branch '%s'\n", branchName)
 			}
 		}
 	}
@@ -275,11 +278,11 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 				if errMsg == "" {
 					errMsg = err.Error()
 				}
-				fmt.Printf("    Error force-pushing branch '%s': %s\n", branchName, errMsg)
+				errorColor.Printf("    Error force-pushing branch '%s': %s\n", branchName, errMsg)
 				errorCount++
 			} else {
 				successForceCount++
-				fmt.Printf("    Successfully force-pushed branch '%s'\n", branchName)
+				successColor.Printf("    Successfully force-pushed branch '%s'\n", branchName)
 			}
 		}
 	}

@@ -330,7 +330,7 @@ func rebaseTower(config *Config, currentTower *Tower, repoPath string, gitRepo *
 	}
 
 	successColor := color.New(color.FgGreen).Add(color.Bold)
-	successColor.Println("\nTower rebase completed successfully!")
+	successColor.Println("\nTower rebase completed successfully! Run 'ghenga sync' to update your remote branches.")
 
 	fmt.Printf("Restoring original branch '%s'...\n", originalBranch)
 	checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
