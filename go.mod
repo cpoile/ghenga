@@ -1,12 +1,14 @@
 module github.com/cpoile/ghenga
 
-go 1.23.7
+go 1.23.0
 
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/alecthomas/kong v1.10.0
 	github.com/fatih/color v1.18.0
 	github.com/go-git/go-git/v5 v5.14.0
+	github.com/jotaen/kong-completion v0.0.6
+	github.com/posener/complete v1.2.3
 	github.com/stretchr/testify v1.10.0
 )
 
@@ -24,13 +26,11 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
-	github.com/jotaen/kong-completion v0.0.6 // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/pjbgf/sha1cd v0.3.2 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/posener/complete v1.2.3 // indirect
 	github.com/riywo/loginshell v0.0.0-20200815045211-7d26008be1ab // indirect
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect
 	github.com/skeema/knownhosts v1.3.1 // indirect
