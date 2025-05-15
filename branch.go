@@ -9,7 +9,7 @@ import (
 	"github.com/posener/complete"
 )
 
-const MAX_BRANCHES_TO_PICK_BASE_FROM = 20
+const MAX_BRANCHES_TO_PICK_BASE_FROM = 10
 
 // SetCurrentTower sets the current tower for a repository
 func SetCurrentTower(repo *RepoInfo, towerName string) error {
