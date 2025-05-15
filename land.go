@@ -131,8 +131,9 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 			return fmt.Errorf("failed to checkout new bottom branch '%s': %w\nOutput: %s", newBottomBranch.Name, err, string(output))
 		}
 
-		fmt.Printf("    Running 'git rebase --onto %s %s'...\n", currentTower.Base, landedBranchName)
-		rebaseCmd := exec.Command("git", "rebase", "--onto", currentTower.Base, landedBranchName)
+		// landedBranchName is the old base of newBottomBranch
+		fmt.Printf("    Running 'git rebase --onto %s %s %s'...\n", currentTower.Base, landedBranchName, newBottomBranch.Name)
+		rebaseCmd := exec.Command("git", "rebase", "--onto", currentTower.Base, landedBranchName, newBottomBranch.Name)
 		rebaseCmd.Dir = repoPath
 		var rebaseStdout, rebaseStderr bytes.Buffer
 		rebaseCmd.Stdout = &rebaseStdout
