@@ -165,7 +165,7 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 	// --- Run rebase command on the rest of the tower ---
 	if len(currentTower.Branches) > 0 {
 		fmt.Println("\nRebasing remaining tower branches sequentially...")
-		if err := rebaseTower(config, currentTower, repoPath, r, true); err != nil {
+		if err := rebaseTower(true, "", ""); err != nil {
 			// The rebaseTower function handles aborting on failure
 			return fmt.Errorf("failed during sequential rebase of remaining tower branches: %w", err)
 		}

@@ -23,21 +23,40 @@ type BranchInfo struct {
 
 type RebaseCmd struct {
 	Do       RebaseDoCmd       `cmd:"" default:"1" hidden:"" help:"Rebase all branches in the current tower that have diverged from their base"`
+	From     RebaseFromCmd     `cmd:"from" help:"Rebase [branch] from [commit] onto its base, then continue rebasing all latter branches in the current tower."`
 	Undo     RebaseUndoCmd     `cmd:"undo" help:"Undo the last rebase operation for the current tower"`
 	Continue RebaseContinueCmd `cmd:"continue" help:"Continue a paused rebase operation after resolving conflicts"`
+	Cancel   RebaseCancelCmd   `cmd:"cancel" help:"Cancel an in-progress rebase operation"`
 }
 
 type RebaseDoCmd struct {
 }
 
 func (r *RebaseDoCmd) Run(_ *kong.Context) error {
+	return rebaseTower(false, "", "")
+}
+
+type RebaseFromCmd struct {
+	Branch     string `kong:"optional,arg,name='branch',help='Branch to start partial rebase from.'"`
+	FromCommit string `kong:"optional,arg,name='commit',help='Short commit hash on the specified branch to rebase from.'"`
+}
+
+func (r *RebaseFromCmd) Run(_ *kong.Context) error {
+	return rebaseTower(false, r.Branch, r.FromCommit)
+}
+
+// rebaseTower performs the core logic of rebasing a tower's branches.
+// It checks for divergence, saves undo state, asks for confirmation (if skipConfirmation is false),
+// and performs the sequential rebase, pausing if conflicts occur.
+// If partialRebaseBranchName and partialRebaseCommit are provided, it starts rebasing from that specific commit on that branch.
+func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialRebaseCommit string) error {
 	// Check if a rebase is already in progress
 	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
 		return err
 	}
 	if currentTower.RebaseState != nil && currentTower.RebaseState.IsInProgress {
-		return fmt.Errorf("a rebase is already in progress for tower '%s'. Resolve conflicts and run 'ghenga rebase continue' or clear the state manually", currentTower.Name)
+		return fmt.Errorf("a rebase is already in progress for tower '%s'. Resolve conflicts and run 'ghenga rebase continue' or clear the state with 'ghenga rebase cancel'", currentTower.Name)
 	}
 
 	// Check Git Status first
@@ -59,18 +78,6 @@ func (r *RebaseDoCmd) Run(_ *kong.Context) error {
 		return fmt.Errorf("working directory has changes, possibly from a previous rebase attempt. Please resolve conflicts and run 'ghenga rebase continue' or clean the directory")
 	}
 
-	gitRepo, err := openGitRepo()
-	if err != nil {
-		return err
-	}
-
-	return rebaseTower(config, currentTower, repoPath, gitRepo, false) // Call the refactored function
-}
-
-// rebaseTower performs the core logic of rebasing a tower's branches.
-// It checks for divergence, saves undo state, asks for confirmation (if skipConfirmation is false),
-// and performs the sequential rebase, pausing if conflicts occur.
-func rebaseTower(config *Config, currentTower *Tower, repoPath string, gitRepo *git.Repository, skipConfirmation bool) error {
 	if currentTower.Base == "" {
 		return fmt.Errorf("tower '%s' has no base branch set. Use 'ghenga base <branch-name>' to set it first", currentTower.Name)
 	}
@@ -125,6 +132,11 @@ func rebaseTower(config *Config, currentTower *Tower, repoPath string, gitRepo *
 	currentTime := time.Now().Format(time.RFC3339)
 	currentTower.LastRebased = currentTime
 
+	gitRepo, err := openGitRepo()
+	if err != nil {
+		return err
+	}
+
 	for i := range currentTower.Branches {
 		branch := &currentTower.Branches[i]
 		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
@@ -142,10 +154,8 @@ func rebaseTower(config *Config, currentTower *Tower, repoPath string, gitRepo *
 		return fmt.Errorf("failed to save configuration with branch states: %w", err)
 	}
 
-	// Use internal BranchInfo struct for analysis
-	var branchInfos []BranchInfo
-
-	originalBranch, err := getCurrentBranchName(gitRepo) // Get original branch name
+	// Determine original branch before starting any operations that might change it
+	originalBranch, err := getCurrentBranchName(gitRepo)
 	if err != nil {
 		fmt.Printf("Warning: Could not determine current branch, defaulting to HEAD: %v\n", err)
 		head, headErr := gitRepo.Head()
@@ -158,73 +168,131 @@ func rebaseTower(config *Config, currentTower *Tower, repoPath string, gitRepo *
 
 	// First pass: collect all branches, their unique commits, and determine which have diverged
 	fmt.Println("Analyzing branches for rebase...")
-	for i := 1; i < len(currentTower.Branches); i++ {
-		branch := currentTower.Branches[i]
-		baseBranch := currentTower.Branches[i-1]
 
-		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
-		branchHead, err := gitRepo.Reference(branchRefName, true)
-		if err != nil {
-			fmt.Printf("  Skipping branch '%s': does not exist locally.\n", branch.Name)
-			continue
-		}
+	var branchesToPlan []BranchInfo // This will be the list of branches to rebase, in order.
 
-		baseRefName := plumbing.NewBranchReferenceName(baseBranch.Name)
-		baseHead, err := gitRepo.Reference(baseRefName, true)
-		if err != nil {
-			fmt.Printf("  Skipping branch '%s': its base '%s' does not exist locally.\n", branch.Name, baseBranch.Name)
-			continue
-		}
+	isPartialRebase := partialRebaseBranchName != "" && partialRebaseCommit != ""
+	isInvalidPartialArgs := (partialRebaseBranchName != "" && partialRebaseCommit == "") || (partialRebaseBranchName == "" && partialRebaseCommit != "")
+	if isInvalidPartialArgs {
+		return fmt.Errorf("for partial rebase, both branch name and commit hash must be provided")
+	}
 
-		// Find common ancestor
-		mergeBase, err := findMergeBase(gitRepo, branchHead.Hash(), baseHead.Hash())
-		if err != nil {
-			return fmt.Errorf("failed to find merge base between '%s' and '%s': %w", branch.Name, baseBranch.Name, err)
-		}
+	iterStartIndex := 1 // Default: start analyzing from the second branch in the tower
+	var resolvedPartialCommitHash plumbing.Hash
 
-		branchInfo := BranchInfo{
-			Index:          i,
-			Name:           branch.Name,
-			BaseBranchName: baseBranch.Name,
-			UniqueCommits:  []string{},
-			IsDiverged:     mergeBase != baseHead.Hash(),
-		}
-
-		// Use git rev-list to find unique commits
-		cmd := exec.Command("git", "rev-list", "--reverse", baseHead.Hash().String()+".."+branchHead.Hash().String())
-		cmd.Dir = repoPath
-		output, err := cmd.Output()
-		if err != nil {
-			return fmt.Errorf("failed to list unique commits for '%s': %w", branch.Name, err)
-		}
-
-		commits := strings.Split(strings.TrimSpace(string(output)), "\n")
-		// Filter out empty strings which can happen if output is empty
-		filteredCommits := []string{}
-		for _, c := range commits {
-			if c != "" {
-				filteredCommits = append(filteredCommits, c)
+	if isPartialRebase {
+		targetBranchIdx := -1
+		for i, b := range currentTower.Branches {
+			if b.Name == partialRebaseBranchName {
+				targetBranchIdx = i
+				break
 			}
 		}
-		branchInfo.UniqueCommits = filteredCommits
+		if targetBranchIdx == -1 {
+			return fmt.Errorf("branch '%s' not found in tower '%s'", partialRebaseBranchName, currentTower.Name)
+		}
+		if targetBranchIdx == 0 { // Cannot rebase the first branch onto "branch below it"
+			return fmt.Errorf("cannot start partial rebase from the first branch '%s' of the tower; it has no branch below it", partialRebaseBranchName)
+		}
 
-		branchInfos = append(branchInfos, branchInfo)
+		var err error
+		resolvedPartialCommitHash, err = getFullCommitHashForBranch(gitRepo, repoPath, partialRebaseBranchName, partialRebaseCommit)
+		if err != nil {
+			return fmt.Errorf("failed to resolve commit '%s' on branch '%s': %w", partialRebaseCommit, partialRebaseBranchName, err)
+		}
+		fmt.Printf("Partial rebase requested: Branch '%s' from commit '%s' (%s)\n", partialRebaseBranchName, partialRebaseCommit, resolvedPartialCommitHash.String()[:7])
+		iterStartIndex = targetBranchIdx // Start analysis *from* the target branch for the loop
 	}
 
-	// Keep every branch after (and including) the first diverged branch
-	var divergedBranches []BranchInfo
-	firstDivergedFound := false
-	for i := range branchInfos {
-		if branchInfos[i].IsDiverged {
-			firstDivergedFound = true
+	firstBranchToRebaseFound := false // Flag to pull in all subsequent branches once the first is identified
+
+	for i := iterStartIndex; i < len(currentTower.Branches); i++ {
+		currentBranchInTower := currentTower.Branches[i]
+		baseBranchInTower := currentTower.Branches[i-1]
+
+		branchRefName := plumbing.NewBranchReferenceName(currentBranchInTower.Name)
+		branchHead, err := gitRepo.Reference(branchRefName, true)
+		if err != nil {
+			fmt.Printf("  Skipping branch '%s' from rebase plan: does not exist locally.\n", currentBranchInTower.Name)
+			continue
 		}
-		if firstDivergedFound {
-			divergedBranches = append(divergedBranches, branchInfos[i])
+
+		baseRefName := plumbing.NewBranchReferenceName(baseBranchInTower.Name)
+		baseHead, err := gitRepo.Reference(baseRefName, true)
+		if err != nil {
+			fmt.Printf("  Skipping branch '%s' from rebase plan: its base '%s' does not exist locally.\n", currentBranchInTower.Name, baseBranchInTower.Name)
+			continue
+		}
+
+		branchIsTargetOfPartialRebase := isPartialRebase && currentBranchInTower.Name == partialRebaseBranchName
+		currentUniqueCommits := []string{}
+		isConsideredDivergedForPlanning := false
+
+		if branchIsTargetOfPartialRebase {
+			// Ensure resolvedPartialCommitHash is an ancestor of branchHead.Hash()
+			isAncestorCmd := exec.Command("git", "merge-base", "--is-ancestor", resolvedPartialCommitHash.String(), branchHead.Hash().String())
+			if _, err := cmdOutput(isAncestorCmd, repoPath, fmt.Sprintf("check ancestry for %s on %s", resolvedPartialCommitHash.String()[:7], currentBranchInTower.Name)); err != nil {
+				return fmt.Errorf("commit '%s' (%s) is not an ancestor of the tip of branch '%s'. Cannot perform partial rebase: %w", partialRebaseCommit, resolvedPartialCommitHash.String()[:7], currentBranchInTower.Name, err)
+			}
+
+			cmd := exec.Command("git", "rev-list", "--reverse", resolvedPartialCommitHash.String()+"^"+".."+branchHead.Hash().String())
+			output, err := cmdOutput(cmd, repoPath, fmt.Sprintf("list partial unique commits for '%s'", currentBranchInTower.Name))
+			if err != nil {
+				return err
+			}
+			currentUniqueCommits = parseCommitList(output)
+			isConsideredDivergedForPlanning = true // Target of partial rebase is always "diverged" for planning
+		} else {
+			// Standard divergence check against baseBranchInTower
+			mergeBase, err := findMergeBase(gitRepo, branchHead.Hash(), baseHead.Hash())
+			if err != nil {
+				return fmt.Errorf("failed to find merge base between '%s' and '%s': %w", currentBranchInTower.Name, baseBranchInTower.Name, err)
+			}
+			if mergeBase != baseHead.Hash() {
+				isConsideredDivergedForPlanning = true
+			}
+			// Standard unique commits: baseBranchInTower.Tip .. currentBranchInTower.Tip
+			cmd := exec.Command("git", "rev-list", "--reverse", baseHead.Hash().String()+".."+branchHead.Hash().String())
+			output, err := cmdOutput(cmd, repoPath, fmt.Sprintf("list unique commits for '%s'", currentBranchInTower.Name))
+			if err != nil {
+				return err
+			}
+			currentUniqueCommits = parseCommitList(output)
+		}
+
+		if isConsideredDivergedForPlanning || firstBranchToRebaseFound {
+			if !firstBranchToRebaseFound && isConsideredDivergedForPlanning {
+				firstBranchToRebaseFound = true
+			}
+
+			// If this branch wasn't the target of partial or initially diverged,
+			// but a previous one was (firstBranchToRebaseFound = true),
+			// we need its standard unique commits (already calculated above if not partial target).
+			// This explicit recalculation is only needed if it wasn't isConsideredDivergedForPlanning initially.
+			if firstBranchToRebaseFound && !isConsideredDivergedForPlanning && !branchIsTargetOfPartialRebase {
+				// This branch is being pulled into rebase due to a predecessor.
+				// Its unique commits are already calculated against its original base.
+				// We mark it as 'isDiverged' for the BranchInfo struct consistency if it wasn't already.
+				isConsideredDivergedForPlanning = true // Effectively, it is part of the rebase chain.
+			}
+
+			branchInfo := BranchInfo{
+				Index:          i, // Original index in tower
+				Name:           currentBranchInTower.Name,
+				BaseBranchName: baseBranchInTower.Name, // Its designated base from the tower structure
+				UniqueCommits:  currentUniqueCommits,
+				IsDiverged:     isConsideredDivergedForPlanning, // Store if it was the trigger or naturally diverged, or pulled in
+			}
+			branchesToPlan = append(branchesToPlan, branchInfo)
 		}
 	}
 
-	if len(divergedBranches) == 0 {
-		fmt.Println("No diverged branches found in the current tower. All branches are up to date.")
+	if len(branchesToPlan) == 0 {
+		if isPartialRebase {
+			fmt.Printf("No commits to rebase for branch '%s' from commit '%s'. Ensure the commit is not the tip or already rebased.\n", partialRebaseBranchName, partialRebaseCommit)
+		} else {
+			fmt.Println("No diverged branches found in the current tower. All branches are up to date.")
+		}
 		// Clear any potential leftover rebase state
 		currentTower.RebaseState = nil
 		_ = SaveConfig(config) // Best effort save
@@ -234,8 +302,8 @@ func rebaseTower(config *Config, currentTower *Tower, repoPath string, gitRepo *
 	branchColor := color.New(color.FgYellow)
 	warningColor := color.New(color.FgRed).Add(color.Bold)
 
-	fmt.Printf("Found %d branch(es) needing rebase in tower '%s':\n", len(divergedBranches), currentTower.Name)
-	for _, db := range divergedBranches {
+	fmt.Printf("Found %d branch(es) needing rebase in tower '%s':\n", len(branchesToPlan), currentTower.Name)
+	for _, db := range branchesToPlan {
 		commitCount := len(db.UniqueCommits)
 		commitStr := "commits"
 		if commitCount == 1 {
@@ -261,9 +329,9 @@ func rebaseTower(config *Config, currentTower *Tower, repoPath string, gitRepo *
 	}
 
 	// Convert BranchInfo to BranchRebaseInfo for state saving
-	divergedBranchRebaseInfos := make([]BranchRebaseInfo, len(divergedBranches))
-	for i, db := range divergedBranches {
-		divergedBranchRebaseInfos[i] = BranchRebaseInfo{
+	branchRebaseInfos := make([]BranchRebaseInfo, len(branchesToPlan))
+	for i, db := range branchesToPlan {
+		branchRebaseInfos[i] = BranchRebaseInfo{
 			Name:           db.Name,
 			BaseBranchName: db.BaseBranchName,
 			UniqueCommits:  db.UniqueCommits,
@@ -271,7 +339,7 @@ func rebaseTower(config *Config, currentTower *Tower, repoPath string, gitRepo *
 	}
 
 	// Perform rebases sequentially
-	remainingBranchesToRebase := divergedBranchRebaseInfos
+	remainingBranchesToRebase := branchRebaseInfos
 	fmt.Println("----------------------------------------")
 
 	var currentTempBranch string // Track the temp branch used for the current branch rebase
@@ -525,6 +593,82 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 	return nil
 }
 
+// RebaseCancelCmd defines the command for cancelling an in-progress rebase.
+type RebaseCancelCmd struct{}
+
+// Run executes the logic to cancel an in-progress rebase.
+func (c *RebaseCancelCmd) Run(_ *kong.Context) error {
+	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
+	if err != nil {
+		return err
+	}
+
+	if currentTower.RebaseState == nil || !currentTower.RebaseState.IsInProgress {
+		fmt.Printf("No rebase operation in progress for tower '%s'. Nothing to cancel.\n", currentTower.Name)
+		return nil
+	}
+
+	fmt.Println("Cancelling in-progress rebase operation...")
+
+	// Attempt to abort any ongoing git operation (e.g., cherry-pick)
+	// Check if we are in a cherry-pick sequence first.
+	// We can infer this if state.TemporaryBranch is set and potentially state.CurrentCommitIndex > 0 or specific git files exist.
+	// A simple `git cherry-pick --abort` is generally safe to run even if not strictly in a cherry-pick.
+	// Similarly, `git rebase --abort` could be considered if the rebase mechanism was different.
+	// Given our current implementation uses cherry-pick:
+	abortCmd := exec.Command("git", "cherry-pick", "--abort")
+	abortCmd.Dir = repoPath
+	if output, err := abortCmd.CombinedOutput(); err != nil {
+		// Not a fatal error if abort fails (e.g., no cherry-pick in progress), but worth noting.
+		fmt.Printf("  Note: 'git cherry-pick --abort' failed or had nothing to abort: %v\nOutput:\n%s\n", err, string(output))
+		// We might also be in a state where `git rebase --abort` is the correct command if something went very wrong,
+		// but ghenga's rebase is cherry-pick based. For now, we'll stick to cherry-pick abort.
+	} else {
+		fmt.Println("  Successfully aborted git cherry-pick operation.")
+	}
+
+	originalBranch := currentTower.RebaseState.OriginalBranch
+	temporaryBranchToDelete := currentTower.RebaseState.TemporaryBranch // Store before clearing
+
+	// Clear the rebase state from the configuration
+	currentTower.RebaseState = nil
+	if err := SaveConfig(config); err != nil {
+		return fmt.Errorf("failed to clear rebase state in configuration: %w", err)
+	}
+	fmt.Println("  Cleared ghenga rebase state from configuration.")
+
+	// Attempt to checkout the original branch
+	if originalBranch != "" {
+		fmt.Printf("  Attempting to checkout original branch '%s'...\n", originalBranch)
+		checkoutCmd := exec.Command("git", "checkout", originalBranch)
+		checkoutCmd.Dir = repoPath
+		if output, err := checkoutCmd.CombinedOutput(); err != nil {
+			fmt.Printf("  Warning: Failed to checkout original branch '%s': %v\nOutput:\n%s", originalBranch, err, string(output))
+			fmt.Println("  You may need to manually checkout your desired branch.")
+		} else {
+			fmt.Printf("  Successfully checked out branch '%s'.\n", originalBranch)
+		}
+	} else {
+		fmt.Println("  No original branch recorded in rebase state. Please checkout your desired branch manually.")
+	}
+
+	// Clean up any temporary branches if one was recorded and still exists
+	if temporaryBranchToDelete != "" {
+		fmt.Printf("  Attempting to delete temporary branch '%s'...\n", temporaryBranchToDelete)
+		deleteTempCmd := exec.Command("git", "branch", "-D", temporaryBranchToDelete)
+		deleteTempCmd.Dir = repoPath
+		if output, err := deleteTempCmd.CombinedOutput(); err != nil {
+			// This is not a critical failure, as the main goal (cancelling rebase state) is achieved.
+			fmt.Printf("  Warning: Failed to delete temporary branch '%s': %v\nOutput:\n%s", temporaryBranchToDelete, err, string(output))
+		} else {
+			fmt.Printf("  Successfully deleted temporary branch '%s'.\n", temporaryBranchToDelete)
+		}
+	}
+
+	fmt.Println("Rebase operation cancelled.")
+	return nil
+}
+
 // --- Helper Functions ---
 
 // Specific error to indicate a pause request
@@ -704,27 +848,17 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 		return err
 	}
 
-	warningColor := color.New(color.FgRed).Add(color.Bold)
-
-	warningColor.Println("\nWARNING: Undoing a rebase will reset branches to their state before the last completed rebase.")
-	warningColor.Printf("This will attempt to restore %d branches using stored commit hashes from %s.\n",
-		branchesToRestore, currentTower.LastRebased)
-	warningColor.Println("Any changes made after the rebase will be lost.")
-
-	fmt.Print("\nDo you want to proceed with undoing the last rebase? [y/N]: ")
-
-	var response string
-	fmt.Scanln(&response)
-
-	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
-		fmt.Println("Undo operation cancelled.")
-		return nil
-	}
-
+	// Determine original branch before attempting to restore other branches
 	originalBranch, err := getCurrentBranchName(gitRepo)
 	if err != nil {
-		fmt.Printf("Warning: Could not determine current branch: %v\n", err)
-		originalBranch = "HEAD" // Fallback
+		fmt.Printf("Warning: Could not determine current branch during undo: %v\n", err)
+		// Attempt to get HEAD as a fallback, but it might not be a branch name
+		headRef, headErr := gitRepo.Head()
+		if headErr == nil && headRef != nil && headRef.Name().IsBranch() {
+			originalBranch = headRef.Name().Short()
+		} else {
+			originalBranch = "HEAD" // Fallback, may not be a checkoutable branch
+		}
 	}
 
 	fmt.Println("Attempting to restore branches...")
@@ -791,7 +925,66 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 
 	fmt.Printf("\nUndo operation finished. Restored %d branches.\n", restoredCount)
 	if failedCount > 0 {
+		warningColor := color.New(color.FgRed).Add(color.Bold)
 		warningColor.Printf("Failed to restore %d branches (see warnings above).\n", failedCount)
 	}
 	return nil
+}
+
+// cmdOutput executes a command and returns its stdout or an error.
+func cmdOutput(cmd *exec.Cmd, dir string, actionDesc string) (string, error) {
+	cmd.Dir = dir
+	outputBytes, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = string(ee.Stderr)
+		}
+		if stderr != "" {
+			return "", fmt.Errorf("failed to %s: %w\nStderr: %s", actionDesc, err, stderr)
+		}
+		return "", fmt.Errorf("failed to %s: %w", actionDesc, err)
+	}
+	return string(outputBytes), nil
+}
+
+// parseCommitList splits a string of newline-separated commit hashes into a slice.
+func parseCommitList(output string) []string {
+	commits := strings.Split(strings.TrimSpace(string(output)), "\n")
+	filteredCommits := []string{}
+	for _, c := range commits {
+		if c != "" {
+			filteredCommits = append(filteredCommits, c)
+		}
+	}
+	return filteredCommits
+}
+
+// getFullCommitHashForBranch resolves a short or full commit hash string to a full plumbing.Hash,
+// ensuring the commit exists on the specified branch.
+func getFullCommitHashForBranch(repo *git.Repository, repoPath string, branchName string, commitHashStr string) (plumbing.Hash, error) {
+	// 1. Resolve the commitHashStr to a full plumbing.Hash (could be on any branch initially)
+	fullHash, err := repo.ResolveRevision(plumbing.Revision(commitHashStr))
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("could not resolve commit hash '%s': %w", commitHashStr, err)
+	}
+
+	// 2. Get the tip of the branch
+	branchRefName := plumbing.NewBranchReferenceName(branchName)
+	branchHeadRef, err := repo.Reference(branchRefName, true)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("could not get reference for branch '%s': %w", branchName, err)
+	}
+
+	// 3. Verify the resolved commit is an ancestor of the branch's tip using `git merge-base --is-ancestor`
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", fullHash.String(), branchHeadRef.Hash().String())
+	// repoPath is needed if the git.Repository object doesn't have its worktree correctly set for cmd.Dir
+	// Assuming repoPath is the root of the worktree.
+	cmd.Dir = repoPath
+	if err := cmd.Run(); err != nil {
+		// cmd.Run() returns ExitError if command exits non-zero.
+		return plumbing.ZeroHash, fmt.Errorf("commit '%s' (%s) is not an ancestor of branch '%s' tip (%s)", commitHashStr, fullHash.String()[:7], branchName, branchHeadRef.Hash().String()[:7])
+	}
+
+	return *fullHash, nil
 }

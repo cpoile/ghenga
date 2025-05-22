@@ -243,6 +243,9 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 
 				if hasDiverged && commit.Hash == divergencePoint {
 					divergedColor.Printf("    ⚠️ This branch has diverged ↓↓ here ↓↓ from the branch below. Run 'ghenga rebase' to fix.\n")
+					branchColor.Printf("        If the branch below has been rebased onto its merge-base, you can run\n")
+					branchColor.Printf("        'ghenga rebase from %s [commit-hash]' to rebase this branch onto the branch below.\n", branch.Name)
+					branchColor.Printf("        Use the commit hash from %s that is the first unique commit after the branch below.\n", branch.Name)
 					message := strings.Split(commit.Message, "\n")[0]
 					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
 					break
