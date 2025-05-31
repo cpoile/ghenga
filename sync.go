@@ -198,12 +198,9 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 			fmt.Printf("  Pulling branch '%s'...\n", branchName)
 
 			// Checkout branch first
-			checkoutCmd := exec.Command("git", "checkout", branchName)
-			checkoutCmd.Dir = repoPath
-			output, err := checkoutCmd.CombinedOutput()
-			if err != nil {
+			if err := CheckoutBranch(repoPath, branchName); err != nil {
 				failedPullCount++
-				errorColor.Printf("    Error checking out branch '%s' before pull: %s\n    Output: %s\n", branchName, err, string(output))
+				errorColor.Printf("    Error checking out branch '%s' before pull: %s\n", branchName, err)
 				errorCount++
 				continue
 			}
@@ -211,7 +208,7 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 			// Attempt fast-forward pull
 			pullCmd := exec.Command("git", "pull", cmd.Remote, branchName, "--ff-only")
 			pullCmd.Dir = repoPath
-			output, err = pullCmd.CombinedOutput()
+			output, err := pullCmd.CombinedOutput()
 			pullOutput := strings.TrimSpace(string(output))
 
 			if err != nil {
@@ -290,9 +287,7 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 	// Restore original branch if possible
 	if originalBranchName != "" {
 		fmt.Printf("\nRestoring original branch '%s'...\n", originalBranchName)
-		checkoutCmd := exec.Command("git", "checkout", originalBranchName)
-		checkoutCmd.Dir = repoPath
-		if err := checkoutCmd.Run(); err != nil {
+		if err := CheckoutBranch(repoPath, originalBranchName); err != nil {
 			fmt.Printf("Warning: Failed to restore original branch '%s': %v\n", originalBranchName, err)
 		}
 	}

@@ -290,10 +290,8 @@ func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName,
 	currentlyOnLocalBranch := currentBranchToPreserve == localBranch
 	if !currentlyOnLocalBranch {
 		fmt.Printf("    Checking out local branch '%s'...\n", localBranch)
-		checkoutCmd := exec.Command("git", "checkout", localBranch)
-		checkoutCmd.Dir = repoPath
-		if output, err := checkoutCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to checkout local branch '%s': %w\nOutput: %s", localBranch, err, string(output))
+		if err := CheckoutBranch(repoPath, localBranch); err != nil {
+			return fmt.Errorf("failed to checkout local branch '%s': %w", localBranch, err)
 		}
 	}
 
@@ -309,11 +307,9 @@ func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName,
 	// If we checked out the local branch temporarily, check back out to original branch now
 	if !currentlyOnLocalBranch && currentBranchToPreserve != "" {
 		fmt.Printf("    Checking out original branch '%s'...\n", currentBranchToPreserve)
-		checkoutCmd := exec.Command("git", "checkout", currentBranchToPreserve)
-		checkoutCmd.Dir = repoPath
-		if output, err := checkoutCmd.CombinedOutput(); err != nil {
+		if err := CheckoutBranch(repoPath, currentBranchToPreserve); err != nil {
 			// This is problematic, we updated local but couldn't switch back
-			return fmt.Errorf("CRITICAL: failed to checkout original branch '%s' after updating base branch: %w\nOutput: %s", currentBranchToPreserve, err, string(output))
+			return fmt.Errorf("CRITICAL: failed to checkout original branch '%s' after updating base branch: %w", currentBranchToPreserve, err)
 		}
 	}
 

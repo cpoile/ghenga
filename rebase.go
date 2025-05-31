@@ -394,9 +394,7 @@ func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialR
 			// Unexpected error during cherry-pick (not a pause)
 			fmt.Printf("Error during rebase of '%s': %v\n", curBranchInfo.Name, rebaseStatus)
 			fmt.Println("Attempting to return to original branch...")
-			checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
-			checkoutOriginalCmd.Dir = repoPath
-			checkoutOriginalCmd.Run() // Best effort
+			CheckoutBranch(repoPath, originalBranch) // Best effort
 			return fmt.Errorf("failed during rebase of '%s': %w", curBranchInfo.Name, rebaseStatus)
 		}
 
@@ -408,10 +406,8 @@ func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialR
 	successColor.Println("\nTower rebase completed successfully! Run 'ghenga sync' to update your remote branches.")
 
 	fmt.Printf("Restoring original branch '%s'...\n", originalBranch)
-	checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
-	checkoutOriginalCmd.Dir = repoPath
-	if output, err := checkoutOriginalCmd.CombinedOutput(); err != nil {
-		fmt.Printf("Warning: Failed to checkout original branch '%s': %v\nOutput:\n%s", originalBranch, err, string(output))
+	if err := CheckoutBranch(repoPath, originalBranch); err != nil {
+		fmt.Printf("Warning: Failed to checkout original branch '%s': %v\n", originalBranch, err)
 	}
 
 	// Clear any potential rebase state since we finished successfully
@@ -540,9 +536,7 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 			// Unexpected error during cherry-pick (not a pause)
 			fmt.Printf("Error during rebase continue for '%s': %v\n", currentBranchInfo.Name, rebaseStatus)
 			fmt.Println("Attempting to return to original branch...")
-			checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
-			checkoutOriginalCmd.Dir = repoPath
-			checkoutOriginalCmd.Run()
+			CheckoutBranch(repoPath, originalBranch) // Best effort
 			state.IsInProgress = false
 			_ = SaveConfig(config) // Best effort
 			return fmt.Errorf("failed during rebase continue for '%s': %w", currentBranchInfo.Name, rebaseStatus)
@@ -585,10 +579,8 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 
 	// Restore the original branch
 	fmt.Printf("Restoring original branch '%s'...\n", state.OriginalBranch)
-	checkoutOriginalCmd := exec.Command("git", "checkout", state.OriginalBranch)
-	checkoutOriginalCmd.Dir = repoPath
-	if output, err := checkoutOriginalCmd.CombinedOutput(); err != nil {
-		fmt.Printf("Warning: Failed to checkout original branch '%s': %v\nOutput:\n%s", state.OriginalBranch, err, string(output))
+	if err := CheckoutBranch(repoPath, state.OriginalBranch); err != nil {
+		fmt.Printf("Warning: Failed to checkout original branch '%s': %v\n", state.OriginalBranch, err)
 	}
 
 	// Clear the rebase state
@@ -647,10 +639,8 @@ func (c *RebaseCancelCmd) Run(_ *kong.Context) error {
 	// Attempt to checkout the original branch
 	if originalBranch != "" {
 		fmt.Printf("  Attempting to checkout original branch '%s'...\n", originalBranch)
-		checkoutCmd := exec.Command("git", "checkout", originalBranch)
-		checkoutCmd.Dir = repoPath
-		if output, err := checkoutCmd.CombinedOutput(); err != nil {
-			fmt.Printf("  Warning: Failed to checkout original branch '%s': %v\nOutput:\n%s", originalBranch, err, string(output))
+		if err := CheckoutBranch(repoPath, originalBranch); err != nil {
+			fmt.Printf("  Warning: Failed to checkout original branch '%s': %v\n", originalBranch, err)
 			fmt.Println("  You may need to manually checkout your desired branch.")
 		} else {
 			fmt.Printf("  Successfully checked out branch '%s'.\n", originalBranch)
@@ -684,10 +674,8 @@ var errRebasePaused = fmt.Errorf("rebase paused due to conflict")
 // prepareForBranchRebase checks out the base branch and creates a new temporary branch for cherry-picking.
 func prepareForBranchRebase(repoPath, baseBranchName, targetBranchName, originalBranch string) (string, error) {
 	fmt.Printf("  Checking out base '%s'...\n", baseBranchName)
-	checkoutBaseCmd := exec.Command("git", "checkout", baseBranchName)
-	checkoutBaseCmd.Dir = repoPath
-	if output, err := checkoutBaseCmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("failed to checkout base branch '%s': %w\nOutput:\n%s", baseBranchName, err, string(output))
+	if err := CheckoutBranch(repoPath, baseBranchName); err != nil {
+		return "", fmt.Errorf("failed to checkout base branch '%s': %w", baseBranchName, err)
 	}
 
 	tempBranch := fmt.Sprintf("temp-rebase-%s-%d", targetBranchName, time.Now().UnixNano())
@@ -695,10 +683,8 @@ func prepareForBranchRebase(repoPath, baseBranchName, targetBranchName, original
 	createTempCmd := exec.Command("git", "checkout", "-b", tempBranch)
 	createTempCmd.Dir = repoPath
 	if output, err := createTempCmd.CombinedOutput(); err != nil {
-		// Attempt to checkout original branch before returning
-		checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
-		checkoutOriginalCmd.Dir = repoPath
-		checkoutOriginalCmd.Run() // Best effort cleanup
+		// Attempt to checkout original branch before returning (best effort)
+		CheckoutBranch(repoPath, originalBranch)
 		return "", fmt.Errorf("failed to create temporary branch '%s': %w\nOutput:\n%s", tempBranch, err, string(output))
 	}
 	return tempBranch, nil
@@ -750,22 +736,16 @@ func finalizeSuccessfulBranchRebase(repoPath, targetBranch, tempBranch, original
 	forceUpdateCmd := exec.Command("git", "branch", "-f", targetBranch, tempBranch)
 	forceUpdateCmd.Dir = repoPath
 	if output, err := forceUpdateCmd.CombinedOutput(); err != nil {
-		// Attempt checkout original branch before returning
-		checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
-		checkoutOriginalCmd.Dir = repoPath
-		checkoutOriginalCmd.Run() // Best effort cleanup
+		// Attempt checkout original branch before returning (best effort)
+		CheckoutBranch(repoPath, originalBranch)
 		return fmt.Errorf("failed to update branch '%s' from temp branch '%s': %w\nOutput:\n%s", targetBranch, tempBranch, err, string(output))
 	}
 
 	// Checkout the updated branch (necessary before deleting temp branch)
-	checkoutUpdatedCmd := exec.Command("git", "checkout", targetBranch)
-	checkoutUpdatedCmd.Dir = repoPath
-	if output, err := checkoutUpdatedCmd.CombinedOutput(); err != nil {
-		// Attempt checkout original branch before returning
-		checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
-		checkoutOriginalCmd.Dir = repoPath
-		checkoutOriginalCmd.Run() // Best effort cleanup
-		return fmt.Errorf("failed to checkout updated branch '%s': %w\nOutput:\n%s", targetBranch, err, string(output))
+	if err := CheckoutBranch(repoPath, targetBranch); err != nil {
+		// Attempt checkout original branch before returning (best effort)
+		CheckoutBranch(repoPath, originalBranch)
+		return fmt.Errorf("failed to checkout updated branch '%s': %w", targetBranch, err)
 	}
 
 	fmt.Printf("  Cleaning up temporary branch '%s'...\n", tempBranch)
@@ -923,10 +903,8 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 	// Restore original branch if possible
 	if originalBranch != "HEAD" {
 		fmt.Printf("Restoring original branch '%s'...\n", originalBranch)
-		checkoutOriginalCmd := exec.Command("git", "checkout", originalBranch)
-		checkoutOriginalCmd.Dir = repoPath
-		if output, err := checkoutOriginalCmd.CombinedOutput(); err != nil {
-			fmt.Printf("Warning: Failed to checkout original branch '%s': %v\nOutput:\n%s", originalBranch, err, string(output))
+		if err := CheckoutBranch(repoPath, originalBranch); err != nil {
+			fmt.Printf("Warning: Failed to checkout original branch '%s': %v\n", originalBranch, err)
 		}
 	}
 
