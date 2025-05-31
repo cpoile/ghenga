@@ -33,7 +33,11 @@ type RebaseDoCmd struct {
 }
 
 func (r *RebaseDoCmd) Run(_ *kong.Context) error {
-	return rebaseTower(false, "", "")
+	err := rebaseTower(false, "", "")
+	if err == errRebasePaused {
+		return nil // Successfully paused - return success to CLI
+	}
+	return err
 }
 
 type RebaseFromCmd struct {
@@ -318,14 +322,17 @@ func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialR
 	fmt.Println("You may undo the rebase with 'ghenga rebase undo'.")
 	fmt.Println("You may continue a paused rebase with 'ghenga rebase continue'.")
 
-	fmt.Print("\nProceed with rebasing? [y/N]: ")
+	// Skip confirmation if skipConfirmation is true
+	if !skipConfirmation {
+		fmt.Print("\nProceed with rebasing? [y/N]: ")
 
-	var response string
-	fmt.Scanln(&response)
+		var response string
+		fmt.Scanln(&response)
 
-	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
-		fmt.Println("Rebase operation cancelled.")
-		return nil
+		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+			fmt.Println("Rebase operation cancelled.")
+			return nil
+		}
 	}
 
 	// Convert BranchInfo to BranchRebaseInfo for state saving
@@ -373,7 +380,7 @@ func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialR
 
 		switch rebaseStatus {
 		case errRebasePaused:
-			return nil // Rebase paused, state saved by helper
+			return errRebasePaused // Propagate the pause error to caller
 		case nil:
 			fmt.Printf("  Successfully applied all %d commits for branch '%s'.\n", len(curBranchInfo.UniqueCommits), curBranchInfo.Name)
 			if err := finalizeSuccessfulBranchRebase(repoPath, curBranchInfo.Name, currentTempBranch, originalBranch); err != nil {
@@ -518,7 +525,7 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 
 		switch rebaseStatus {
 		case errRebasePaused:
-			return nil // Rebase paused, state saved by helper
+			return nil // Successfully paused - return success to CLI
 		case nil:
 			// Success for this branch
 			fmt.Printf("  Successfully applied all remaining commits for branch '%s'.\n", currentBranchInfo.Name)

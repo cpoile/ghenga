@@ -165,8 +165,14 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 	// --- Run rebase command on the rest of the tower ---
 	if len(currentTower.Branches) > 0 {
 		fmt.Println("\nRebasing remaining tower branches sequentially...")
-		if err := rebaseTower(true, "", ""); err != nil {
-			// The rebaseTower function handles aborting on failure
+		err := rebaseTower(true, "", "")
+		if err != nil {
+			// Manually abort the cherry-pick or rebase process
+			abortCmd := exec.Command("git", "cherry-pick", "--abort")
+			abortCmd.Dir = repoPath
+			abortCmd.Run() // Ignore errors, as it might not be in a cherry-pick state
+			
+			// Always consider a rebase error as a fatal error in land, even if it's just a conflict pause
 			return fmt.Errorf("failed during sequential rebase of remaining tower branches: %w", err)
 		}
 		fmt.Println("Remaining tower branches rebased successfully.")
