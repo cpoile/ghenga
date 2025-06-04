@@ -12,7 +12,6 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/stretchr/testify/require"
 )
 
@@ -126,23 +125,34 @@ func TestLand_HappyPath(t *testing.T) {
 	require.Len(t, branch2Commit.ParentHashes, 1, "Branch2 should have exactly one parent after rebase")
 	require.Equal(t, baseCommitHash, branch2Commit.ParentHashes[0], "Branch2 should be rebased onto the new base head")
 
-	// 3. Check that the commit introduced in branch2 is still present
-	commitIter, err := localRepo.Log(&git.LogOptions{From: branch2Ref.Hash()})
+	// 3. Verify exact expected state: branch2's content should be preserved after rebase
+	// Check that branch2's specific file exists with exact expected content
+	expectedFileName := "file-feat-b-0.txt"
+	expectedFileContent := "Content for file-feat-b-0.txt\n"
+	assertBranchContainsContent(t, localRepo, branch2Name, expectedFileName, expectedFileContent)
+
+	// Verify exact commit structure: branch2 should have exactly one parent (the base commit)
+	// and contain both the branch1 file and branch2 file
+	rebasedBranch2Commit, err := localRepo.CommitObject(branch2Ref.Hash())
 	require.NoError(t, err)
-	foundBranch2Commit := false
-	err = commitIter.ForEach(func(c *object.Commit) error {
-		if strings.Contains(c.Message, "Add file-feat-b-0.txt") {
-			foundBranch2Commit = true
-			return storer.ErrStop // Found it, stop iterating
-		}
-		// Check if we've reached the base commit, don't go past it
-		if c.Hash == baseCommitHash {
-			return storer.ErrStop
-		}
-		return nil
-	})
+
+	// Verify that both branch1's file and branch2's file exist in the rebased commit
+	branch2Tree, err := rebasedBranch2Commit.Tree()
 	require.NoError(t, err)
-	require.True(t, foundBranch2Commit, "Commit specific to branch2 not found after rebase")
+
+	// Should contain branch1's file (inherited from base)
+	branch1File, err := branch2Tree.File("file-feat-a-0.txt")
+	require.NoError(t, err, "Branch2 should contain branch1's file after rebase")
+	branch1Content, err := branch1File.Contents()
+	require.NoError(t, err)
+	require.Equal(t, "Content for file-feat-a-0.txt\n", branch1Content, "Branch1's file content should be preserved")
+
+	// Should contain branch2's own file
+	branch2File, err := branch2Tree.File("file-feat-b-0.txt")
+	require.NoError(t, err, "Branch2 should contain its own file after rebase")
+	branch2Content, err := branch2File.Contents()
+	require.NoError(t, err)
+	require.Equal(t, expectedFileContent, branch2Content, "Branch2's file content should be preserved")
 
 	// 4. Check local branch1 still exists (LandCmd doesn't delete it locally)
 	_, err = localRepo.Reference(plumbing.NewBranchReferenceName(branch1Name), false)
