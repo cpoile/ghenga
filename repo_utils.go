@@ -336,25 +336,30 @@ func getCurrentBranchName(r *git.Repository) (string, error) {
 }
 
 // isWorkingDirectoryClean checks if the working directory has no uncommitted changes
+// Uses git CLI to respect .gitignore rules properly
 func isWorkingDirectoryClean(r *git.Repository) error {
 	wt, err := r.Worktree()
 	if err != nil {
 		return fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	status, err := wt.Status()
+	// Use git status command which properly respects .gitignore
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = wt.Filesystem.Root()
+	output, err := statusCmd.Output()
 	if err != nil {
-		return fmt.Errorf("failed to get working directory status: %w", err)
+		return fmt.Errorf("failed to get git status: %w", err)
 	}
 
-	if !status.IsClean() {
+	// If there's any output, the working directory is not clean
+	if len(strings.TrimSpace(string(output))) > 0 {
 		return fmt.Errorf("working directory is not clean. Please commit or stash your changes")
 	}
+
 	return nil
 }
 
 // hasConflicts checks if the working directory has merge conflicts using git command
-// TODO: Replace with go-git when we understand the status codes better
 func hasConflicts(r *git.Repository) (bool, error) {
 	// Get the worktree root to run git command in correct directory
 	wt, err := r.Worktree()

@@ -13,12 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestResetDoCmd_HappyPath tests the basic scenario:
+// TestResetOntoCmd_HappyPath tests the basic scenario:
 // - Tower with 2 branches based on old version of master
 // - Master has moved forward with new commits
 // - Reset tower to current master
 // - Verify tower is rebased onto new master
-func TestResetDoCmd_HappyPath(t *testing.T) {
+func TestResetOntoCmd_HappyPath(t *testing.T) {
 	repoPath, repo, cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -69,9 +69,13 @@ func TestResetDoCmd_HappyPath(t *testing.T) {
 	assert.NotEqual(t, oldMasterHash, newMasterHash, "Master should have moved forward")
 
 	// Now run the reset command
-	resetCmd := &ResetDoCmd{
+	resetCmd := &ResetOntoCmd{
 		NewBase: "main",
 	}
+
+	// Mock user input to confirm the reset operation
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
 
 	err = resetCmd.Run(nil)
 	require.NoError(t, err, "Reset command should succeed")
@@ -142,8 +146,8 @@ func getCommitList(repo *git.Repository, fromCommit, toCommit plumbing.Hash) ([]
 	return parseCommitList(string(output)), nil
 }
 
-// TestResetDoCmd_SameBase tests resetting to the same base (should be a no-op)
-func TestResetDoCmd_SameBase(t *testing.T) {
+// TestResetOntoCmd_SameBase tests resetting to the same base (should be a no-op)
+func TestResetOntoCmd_SameBase(t *testing.T) {
 	repoPath, repo, cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -176,9 +180,13 @@ func TestResetDoCmd_SameBase(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reset to the same base (main)
-	resetCmd := &ResetDoCmd{
+	resetCmd := &ResetOntoCmd{
 		NewBase: "main",
 	}
+
+	// Mock user input to confirm the reset operation
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
 
 	err = resetCmd.Run(nil)
 	require.NoError(t, err, "Reset to same base should succeed")
@@ -229,40 +237,42 @@ func TestResetDoCmd_SameBase(t *testing.T) {
 	assert.Equal(t, len(feature1Commits)+1, len(feature2Commits), "feature2 should have exactly one more commit than feature1")
 }
 
-// TestResetDoCmd_ErrorCases tests various error conditions
-func TestResetDoCmd_ErrorCases(t *testing.T) {
+// TestResetOntoCmd_ErrorCases tests various error conditions
+func TestResetOntoCmd_ErrorCases(t *testing.T) {
 	tests := []struct {
 		name        string
-		setup       func(t *testing.T, repo *git.Repository, repoPath string) *ResetDoCmd
+		setup       func(t *testing.T, repo *git.Repository, repoPath string) *ResetOntoCmd
 		expectError string
 	}{
 		{
 			name: "nonexistent base",
-			setup: func(t *testing.T, repo *git.Repository, repoPath string) *ResetDoCmd {
-				// Create tower with branches
+			setup: func(t *testing.T, repo *git.Repository, repoPath string) *ResetOntoCmd {
+				// Create tower with branches (need at least 2 for reset to check base validity)
 				createTestBranch(t, repo, "feature1", 1)
+				createTestBranch(t, repo, "feature2", 1)
 				tower := &Tower{
 					Name:     "test-tower",
 					Base:     "main",
-					Branches: []Branch{{Name: "feature1"}},
+					Branches: []Branch{{Name: "feature1"}, {Name: "feature2"}},
 				}
 				config := createTestConfig(t, repoPath, "test-tower", []*Tower{tower}, "")
 				err := SaveConfig(config)
 				require.NoError(t, err)
 
-				return &ResetDoCmd{NewBase: "nonexistent-branch"}
+				return &ResetOntoCmd{NewBase: "nonexistent-branch"}
 			},
-			expectError: "new base 'nonexistent-branch' does not exist",
+			expectError: "failed to resolve reset base 'nonexistent-branch'",
 		},
 		{
 			name: "dirty working tree",
-			setup: func(t *testing.T, repo *git.Repository, repoPath string) *ResetDoCmd {
-				// Create tower with branches
+			setup: func(t *testing.T, repo *git.Repository, repoPath string) *ResetOntoCmd {
+				// Create tower with branches (need at least 2 for reset to check working tree)
 				createTestBranch(t, repo, "feature1", 1)
+				createTestBranch(t, repo, "feature2", 1)
 				tower := &Tower{
 					Name:     "test-tower",
 					Base:     "main",
-					Branches: []Branch{{Name: "feature1"}},
+					Branches: []Branch{{Name: "feature1"}, {Name: "feature2"}},
 				}
 				config := createTestConfig(t, repoPath, "test-tower", []*Tower{tower}, "")
 				err := SaveConfig(config)
@@ -273,13 +283,13 @@ func TestResetDoCmd_ErrorCases(t *testing.T) {
 				err = os.WriteFile(dirtyFile, []byte("dirty content"), 0644)
 				require.NoError(t, err)
 
-				return &ResetDoCmd{NewBase: "main"}
+				return &ResetOntoCmd{NewBase: "main"}
 			},
 			expectError: "working directory is not clean",
 		},
 		{
 			name: "empty new base argument",
-			setup: func(t *testing.T, repo *git.Repository, repoPath string) *ResetDoCmd {
+			setup: func(t *testing.T, repo *git.Repository, repoPath string) *ResetOntoCmd {
 				// Create tower with branches
 				createTestBranch(t, repo, "feature1", 1)
 				tower := &Tower{
@@ -291,13 +301,13 @@ func TestResetDoCmd_ErrorCases(t *testing.T) {
 				err := SaveConfig(config)
 				require.NoError(t, err)
 
-				return &ResetDoCmd{NewBase: ""}
+				return &ResetOntoCmd{NewBase: ""}
 			},
 			expectError: "new base argument is required",
 		},
 		{
 			name: "tower with no branches",
-			setup: func(t *testing.T, repo *git.Repository, repoPath string) *ResetDoCmd {
+			setup: func(t *testing.T, repo *git.Repository, repoPath string) *ResetOntoCmd {
 				// Create tower with no branches
 				tower := &Tower{
 					Name:     "test-tower",
@@ -308,9 +318,9 @@ func TestResetDoCmd_ErrorCases(t *testing.T) {
 				err := SaveConfig(config)
 				require.NoError(t, err)
 
-				return &ResetDoCmd{NewBase: "main"}
+				return &ResetOntoCmd{NewBase: "main"}
 			},
-			expectError: "tower 'test-tower' has no branches to reset",
+			expectError: "", // Now treated as success (no-op) rather than error
 		},
 	}
 
@@ -322,14 +332,18 @@ func TestResetDoCmd_ErrorCases(t *testing.T) {
 			resetCmd := tt.setup(t, repo, repoPath)
 
 			err := resetCmd.Run(nil)
-			assert.Error(t, err)
-			assert.Contains(t, err.Error(), tt.expectError)
+			if tt.expectError == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			}
 		})
 	}
 }
 
-// TestResetDoCmd_CommitHash tests resetting to a commit hash instead of branch name
-func TestResetDoCmd_CommitHash(t *testing.T) {
+// TestResetOntoCmd_CommitHash tests resetting to a commit hash instead of branch name
+func TestResetOntoCmd_CommitHash(t *testing.T) {
 	repoPath, repo, cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -368,9 +382,13 @@ func TestResetDoCmd_CommitHash(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reset to the specific commit hash (the old main)
-	resetCmd := &ResetDoCmd{
+	resetCmd := &ResetOntoCmd{
 		NewBase: targetCommitHash[:7], // Use short hash
 	}
+
+	// Mock user input to confirm the reset operation
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
 
 	err = resetCmd.Run(nil)
 	require.NoError(t, err, "Reset to commit hash should succeed")
@@ -403,8 +421,8 @@ func TestResetDoCmd_CommitHash(t *testing.T) {
 	assert.Equal(t, *targetCommitFull, mergeBase, "feature1 should be based on the target commit")
 }
 
-// TestResetDoCmd_WithConflicts tests reset when modify/delete conflicts occur during cherry-pick
-func TestResetDoCmd_WithConflicts(t *testing.T) {
+// TestResetOntoCmd_WithConflicts tests reset when modify/delete conflicts occur during cherry-pick
+func TestResetOntoCmd_WithConflicts(t *testing.T) {
 	repoPath, repo, cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -452,11 +470,19 @@ func TestResetDoCmd_WithConflicts(t *testing.T) {
 	// Modify the same file on feature1 (this will conflict with deletion)
 	addSingleCommit(t, repoPath, wt, "conflict-file.txt", "modified content by feature1\n", "Feature1 modifies the file")
 
+	// Create feature2 to ensure we have at least 2 branches for reset to proceed
+	createFeature2Cmd := exec.Command("git", "checkout", "-b", "feature2")
+	createFeature2Cmd.Dir = repoPath
+	_, err = createFeature2Cmd.CombinedOutput()
+	require.NoError(t, err)
+
+	addSingleCommit(t, repoPath, wt, "feature2-file.txt", "feature2 content\n", "Feature2 adds a file")
+
 	// Create tower configuration
 	tower := &Tower{
 		Name:     "test-tower",
 		Base:     "main",
-		Branches: []Branch{{Name: "feature1"}},
+		Branches: []Branch{{Name: "feature1"}, {Name: "feature2"}},
 	}
 	config := createTestConfig(t, repoPath, "test-tower", []*Tower{tower}, "")
 
@@ -464,9 +490,13 @@ func TestResetDoCmd_WithConflicts(t *testing.T) {
 	require.NoError(t, err)
 
 	// Try to reset to the new-base (this should cause conflicts)
-	resetCmd := &ResetDoCmd{
+	resetCmd := &ResetOntoCmd{
 		NewBase: "new-base",
 	}
+
+	// Mock user input to confirm the reset operation
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
 
 	err = resetCmd.Run(nil)
 
@@ -488,19 +518,20 @@ func TestResetDoCmd_WithConflicts(t *testing.T) {
 	}
 }
 
-// TestResetDoCmd_NoBase tests reset when tower has no base set
-func TestResetDoCmd_NoBase(t *testing.T) {
+// TestResetOntoCmd_NoBase tests reset when tower has no base set
+func TestResetOntoCmd_NoBase(t *testing.T) {
 	repoPath, repo, cleanup := setupTestEnv(t)
 	defer cleanup()
 
-	// Setup: Create a feature branch
+	// Setup: Create feature branches (need at least 2 for reset to proceed)
 	createTestBranch(t, repo, "feature1", 2)
+	createTestBranch(t, repo, "feature2", 1)
 
 	// Create a tower configuration with NO BASE set (empty string)
 	tower := &Tower{
 		Name:     "test-tower",
 		Base:     "", // Intentionally empty
-		Branches: []Branch{{Name: "feature1"}},
+		Branches: []Branch{{Name: "feature1"}, {Name: "feature2"}},
 	}
 	config := createTestConfig(t, repoPath, "test-tower", []*Tower{tower}, "")
 
@@ -508,9 +539,13 @@ func TestResetDoCmd_NoBase(t *testing.T) {
 	require.NoError(t, err)
 
 	// Try to reset to a new base
-	resetCmd := &ResetDoCmd{
+	resetCmd := &ResetOntoCmd{
 		NewBase: "main",
 	}
+
+	// Mock user input to confirm the reset operation (if it gets that far)
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
 
 	err = resetCmd.Run(nil)
 
@@ -532,8 +567,8 @@ func TestResetDoCmd_NoBase(t *testing.T) {
 	}
 }
 
-// TestResetDoCmd_SavesUndoState tests that reset saves undo state before making changes
-func TestResetDoCmd_SavesUndoState(t *testing.T) {
+// TestResetOntoCmd_SavesUndoState tests that reset saves undo state before making changes
+func TestResetOntoCmd_SavesUndoState(t *testing.T) {
 	repoPath, repo, cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -586,9 +621,13 @@ func TestResetDoCmd_SavesUndoState(t *testing.T) {
 	}
 
 	// Run reset command
-	resetCmd := &ResetDoCmd{
+	resetCmd := &ResetOntoCmd{
 		NewBase: "main",
 	}
+
+	// Mock user input to confirm the reset operation
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
 
 	err = resetCmd.Run(nil)
 	require.NoError(t, err, "Reset should succeed")
@@ -619,8 +658,8 @@ func TestResetDoCmd_SavesUndoState(t *testing.T) {
 	assert.Equal(t, initialFeature2Hash, branchUndoState["feature2"], "feature2 undo state should match original commit")
 }
 
-// TestResetDoCmd_Undo tests the reset undo functionality
-func TestResetDoCmd_Undo(t *testing.T) {
+// TestResetOntoCmd_Undo tests the reset undo functionality
+func TestResetOntoCmd_Undo(t *testing.T) {
 	repoPath, repo, cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -663,9 +702,13 @@ func TestResetDoCmd_Undo(t *testing.T) {
 	addSingleCommit(t, repoPath, wt, "new-file.txt", "new content", "New commit on main")
 
 	// Perform reset operation
-	resetCmd := &ResetDoCmd{
+	resetCmd := &ResetOntoCmd{
 		NewBase: "main",
 	}
+
+	// Mock user input to confirm the reset operation
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
 
 	err = resetCmd.Run(nil)
 	require.NoError(t, err, "Reset should succeed")

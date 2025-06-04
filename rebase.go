@@ -49,11 +49,25 @@ func (r *RebaseFromCmd) Run(_ *kong.Context) error {
 	return rebaseTower(false, r.Branch, r.FromCommit)
 }
 
+// RebaseMode defines the type of rebase operation
+type RebaseMode int
+
+const (
+	RebaseModeNormal RebaseMode = iota // Only rebase diverged branches
+	RebaseModeReset                    // Rebase all branches in tower order
+)
+
 // rebaseTower performs the core logic of rebasing a tower's branches.
 // It checks for divergence, saves undo state, asks for confirmation (if skipConfirmation is false),
 // and performs the sequential rebase, pausing if conflicts occur.
 // If partialRebaseBranchName and partialRebaseCommit are provided, it starts rebasing from that specific commit on that branch.
 func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialRebaseCommit string) error {
+	return rebaseTowerWithMode(RebaseModeNormal, skipConfirmation, partialRebaseBranchName, partialRebaseCommit, "")
+}
+
+// rebaseTowerWithMode performs the core logic of rebasing a tower's branches with a specified mode.
+// resetNewBase is only used when mode is RebaseModeReset
+func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBranchName string, partialRebaseCommit string, resetNewBase string) error {
 	// Check if a rebase is already in progress
 	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
@@ -182,6 +196,11 @@ func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialR
 	iterStartIndex := 1 // Default: start analyzing from the second branch in the tower
 	var resolvedPartialCommitHash plumbing.Hash
 
+	// For reset mode, we analyze all branches starting from the first one
+	if mode == RebaseModeReset {
+		iterStartIndex = 0
+	}
+
 	if isPartialRebase {
 		targetBranchIdx := -1
 		for i, b := range currentTower.Branches {
@@ -208,86 +227,147 @@ func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialR
 
 	firstBranchToRebaseFound := false // Flag to pull in all subsequent branches once the first is identified
 
-	for i := iterStartIndex; i < len(currentTower.Branches); i++ {
-		currentBranchInTower := currentTower.Branches[i]
-		baseBranchInTower := currentTower.Branches[i-1]
+	// Handle both normal rebase (divergence-based) and reset mode (all branches)
+	if mode == RebaseModeReset {
+		// For reset mode, rebase all branches in order
+		for i := range currentTower.Branches {
+			currentBranchInTower := currentTower.Branches[i]
 
-		branchRefName := plumbing.NewBranchReferenceName(currentBranchInTower.Name)
-		branchHead, err := gitRepo.Reference(branchRefName, true)
-		if err != nil {
-			fmt.Printf("  Skipping branch '%s' from rebase plan: does not exist locally.\n", currentBranchInTower.Name)
-			continue
-		}
-
-		baseRefName := plumbing.NewBranchReferenceName(baseBranchInTower.Name)
-		baseHead, err := gitRepo.Reference(baseRefName, true)
-		if err != nil {
-			fmt.Printf("  Skipping branch '%s' from rebase plan: its base '%s' does not exist locally.\n", currentBranchInTower.Name, baseBranchInTower.Name)
-			continue
-		}
-
-		branchIsTargetOfPartialRebase := isPartialRebase && currentBranchInTower.Name == partialRebaseBranchName
-		currentUniqueCommits := []string{}
-		isConsideredDivergedForPlanning := false
-
-		if branchIsTargetOfPartialRebase {
-			// Ensure resolvedPartialCommitHash is an ancestor of branchHead.Hash()
-			isAncestorCmd := exec.Command("git", "merge-base", "--is-ancestor", resolvedPartialCommitHash.String(), branchHead.Hash().String())
-			if _, err := cmdOutput(isAncestorCmd, repoPath, fmt.Sprintf("check ancestry for %s on %s", resolvedPartialCommitHash.String()[:7], currentBranchInTower.Name)); err != nil {
-				return fmt.Errorf("commit '%s' (%s) is not an ancestor of the tip of branch '%s'. Cannot perform partial rebase: %w", partialRebaseCommit, resolvedPartialCommitHash.String()[:7], currentBranchInTower.Name, err)
+			// Determine the base for this branch
+			var baseBranchName string
+			if i == 0 {
+				// First branch gets rebased onto the new base
+				baseBranchName = resetNewBase
+			} else {
+				// Subsequent branches get rebased onto the previous branch
+				baseBranchName = currentTower.Branches[i-1].Name
 			}
 
-			cmd := exec.Command("git", "rev-list", "--reverse", resolvedPartialCommitHash.String()+"^"+".."+branchHead.Hash().String())
-			output, err := cmdOutput(cmd, repoPath, fmt.Sprintf("list partial unique commits for '%s'", currentBranchInTower.Name))
+			branchRefName := plumbing.NewBranchReferenceName(currentBranchInTower.Name)
+			branchHead, err := gitRepo.Reference(branchRefName, true)
+			if err != nil {
+				fmt.Printf("  Skipping branch '%s' from reset plan: does not exist locally.\n", currentBranchInTower.Name)
+				continue
+			}
+
+			// For reset mode, get unique commits relative to the target base
+			var baseHead plumbing.Hash
+			if i == 0 {
+				// First branch: get commits relative to resetNewBase
+				newBaseRef, err := gitRepo.ResolveRevision(plumbing.Revision(resetNewBase))
+				if err != nil {
+					return fmt.Errorf("failed to resolve reset base '%s': %w", resetNewBase, err)
+				}
+				baseHead = *newBaseRef
+			} else {
+				// Subsequent branches: get commits relative to previous branch
+				prevBranchRef, err := gitRepo.Reference(plumbing.NewBranchReferenceName(baseBranchName), true)
+				if err != nil {
+					return fmt.Errorf("failed to get reference for base branch '%s': %w", baseBranchName, err)
+				}
+				baseHead = prevBranchRef.Hash()
+			}
+
+			cmd := exec.Command("git", "rev-list", "--reverse", baseHead.String()+".."+branchHead.Hash().String())
+			output, err := cmdOutput(cmd, repoPath, fmt.Sprintf("list unique commits for '%s' in reset mode", currentBranchInTower.Name))
 			if err != nil {
 				return err
 			}
-			currentUniqueCommits = parseCommitList(output)
-			isConsideredDivergedForPlanning = true // Target of partial rebase is always "diverged" for planning
-		} else {
-			// Standard divergence check against baseBranchInTower
-			mergeBase, err := findMergeBase(gitRepo, branchHead.Hash(), baseHead.Hash())
-			if err != nil {
-				return fmt.Errorf("failed to find merge base between '%s' and '%s': %w", currentBranchInTower.Name, baseBranchInTower.Name, err)
-			}
-			if mergeBase != baseHead.Hash() {
-				isConsideredDivergedForPlanning = true
-			}
-			// Standard unique commits: baseBranchInTower.Tip .. currentBranchInTower.Tip
-			cmd := exec.Command("git", "rev-list", "--reverse", baseHead.Hash().String()+".."+branchHead.Hash().String())
-			output, err := cmdOutput(cmd, repoPath, fmt.Sprintf("list unique commits for '%s'", currentBranchInTower.Name))
-			if err != nil {
-				return err
-			}
-			currentUniqueCommits = parseCommitList(output)
-		}
+			currentUniqueCommits := parseCommitList(output)
 
-		if isConsideredDivergedForPlanning || firstBranchToRebaseFound {
-			if !firstBranchToRebaseFound && isConsideredDivergedForPlanning {
-				firstBranchToRebaseFound = true
-			}
-
-			// If this branch wasn't the target of partial or initially diverged,
-			// but a previous one was (firstBranchToRebaseFound = true),
-			// we need its standard unique commits (already calculated above if not partial target).
-			// This explicit recalculation is only needed if it wasn't isConsideredDivergedForPlanning initially.
-			if firstBranchToRebaseFound && !isConsideredDivergedForPlanning && !branchIsTargetOfPartialRebase {
-				// This branch is being pulled into rebase due to a predecessor.
-				// Its unique commits are already calculated against its original base.
-				// We mark it as 'isDiverged' for the BranchInfo struct consistency if it wasn't already.
-				isConsideredDivergedForPlanning = true // Effectively, it is part of the rebase chain.
-			}
-
+			// Always include branches in reset mode, even if no unique commits
 			branchInfo := BranchInfo{
-				Index:          i, // Original index in tower
+				Index:          i,
 				Name:           currentBranchInTower.Name,
-				BaseBranchName: baseBranchInTower.Name, // Its designated base from the tower structure
+				BaseBranchName: baseBranchName,
 				UniqueCommits:  currentUniqueCommits,
-				IsDiverged:     isConsideredDivergedForPlanning, // Store if it was the trigger or naturally diverged, or pulled in
+				IsDiverged:     true, // Always considered "diverged" in reset mode
 			}
 			branchesToPlan = append(branchesToPlan, branchInfo)
 		}
-	}
+	} else {
+		// Original normal rebase logic
+		for i := iterStartIndex; i < len(currentTower.Branches); i++ {
+			currentBranchInTower := currentTower.Branches[i]
+			baseBranchInTower := currentTower.Branches[i-1]
+
+			branchRefName := plumbing.NewBranchReferenceName(currentBranchInTower.Name)
+			branchHead, err := gitRepo.Reference(branchRefName, true)
+			if err != nil {
+				fmt.Printf("  Skipping branch '%s' from rebase plan: does not exist locally.\n", currentBranchInTower.Name)
+				continue
+			}
+
+			baseRefName := plumbing.NewBranchReferenceName(baseBranchInTower.Name)
+			baseHead, err := gitRepo.Reference(baseRefName, true)
+			if err != nil {
+				fmt.Printf("  Skipping branch '%s' from rebase plan: its base '%s' does not exist locally.\n", currentBranchInTower.Name, baseBranchInTower.Name)
+				continue
+			}
+
+			branchIsTargetOfPartialRebase := isPartialRebase && currentBranchInTower.Name == partialRebaseBranchName
+			currentUniqueCommits := []string{}
+			isConsideredDivergedForPlanning := false
+
+			if branchIsTargetOfPartialRebase {
+				// Ensure resolvedPartialCommitHash is an ancestor of branchHead.Hash()
+				isAncestorCmd := exec.Command("git", "merge-base", "--is-ancestor", resolvedPartialCommitHash.String(), branchHead.Hash().String())
+				if _, err := cmdOutput(isAncestorCmd, repoPath, fmt.Sprintf("check ancestry for %s on %s", resolvedPartialCommitHash.String()[:7], currentBranchInTower.Name)); err != nil {
+					return fmt.Errorf("commit '%s' (%s) is not an ancestor of the tip of branch '%s'. Cannot perform partial rebase: %w", partialRebaseCommit, resolvedPartialCommitHash.String()[:7], currentBranchInTower.Name, err)
+				}
+
+				cmd := exec.Command("git", "rev-list", "--reverse", resolvedPartialCommitHash.String()+"^"+".."+branchHead.Hash().String())
+				output, err := cmdOutput(cmd, repoPath, fmt.Sprintf("list partial unique commits for '%s'", currentBranchInTower.Name))
+				if err != nil {
+					return err
+				}
+				currentUniqueCommits = parseCommitList(output)
+				isConsideredDivergedForPlanning = true // Target of partial rebase is always "diverged" for planning
+			} else {
+				// Standard divergence check against baseBranchInTower
+				mergeBase, err := findMergeBase(gitRepo, branchHead.Hash(), baseHead.Hash())
+				if err != nil {
+					return fmt.Errorf("failed to find merge base between '%s' and '%s': %w", currentBranchInTower.Name, baseBranchInTower.Name, err)
+				}
+				if mergeBase != baseHead.Hash() {
+					isConsideredDivergedForPlanning = true
+				}
+				// Standard unique commits: baseBranchInTower.Tip .. currentBranchInTower.Tip
+				cmd := exec.Command("git", "rev-list", "--reverse", baseHead.Hash().String()+".."+branchHead.Hash().String())
+				output, err := cmdOutput(cmd, repoPath, fmt.Sprintf("list unique commits for '%s'", currentBranchInTower.Name))
+				if err != nil {
+					return err
+				}
+				currentUniqueCommits = parseCommitList(output)
+			}
+
+			if isConsideredDivergedForPlanning || firstBranchToRebaseFound {
+				if !firstBranchToRebaseFound && isConsideredDivergedForPlanning {
+					firstBranchToRebaseFound = true
+				}
+
+				// If this branch wasn't the target of partial or initially diverged,
+				// but a previous one was (firstBranchToRebaseFound = true),
+				// we need its standard unique commits (already calculated above if not partial target).
+				// This explicit recalculation is only needed if it wasn't isConsideredDivergedForPlanning initially.
+				if firstBranchToRebaseFound && !isConsideredDivergedForPlanning && !branchIsTargetOfPartialRebase {
+					// This branch is being pulled into rebase due to a predecessor.
+					// Its unique commits are already calculated against its original base.
+					// We mark it as 'isDiverged' for the BranchInfo struct consistency if it wasn't already.
+					isConsideredDivergedForPlanning = true // Effectively, it is part of the rebase chain.
+				}
+
+				branchInfo := BranchInfo{
+					Index:          i, // Original index in tower
+					Name:           currentBranchInTower.Name,
+					BaseBranchName: baseBranchInTower.Name, // Its designated base from the tower structure
+					UniqueCommits:  currentUniqueCommits,
+					IsDiverged:     isConsideredDivergedForPlanning, // Store if it was the trigger or naturally diverged, or pulled in
+				}
+				branchesToPlan = append(branchesToPlan, branchInfo)
+			}
+		}
+	} // End of normal rebase vs reset mode logic
 
 	if len(branchesToPlan) == 0 {
 		if isPartialRebase {
@@ -330,6 +410,15 @@ func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialR
 		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
 			fmt.Println("Rebase operation cancelled.")
 			return nil
+		}
+	}
+
+	// Update tower base for reset operation after user confirmation
+	if mode == RebaseModeReset && resetNewBase != "" {
+		fmt.Printf("Updating tower base from '%s' to '%s'...\n", currentTower.Base, resetNewBase)
+		currentTower.Base = resetNewBase
+		if err := SaveConfig(config); err != nil {
+			return fmt.Errorf("failed to update tower base: %w", err)
 		}
 	}
 
@@ -669,10 +758,21 @@ func (c *RebaseCancelCmd) Run(_ *kong.Context) error {
 // Specific error to indicate a pause request
 var errRebasePaused = fmt.Errorf("rebase paused due to conflict")
 
+// checkoutBranchOrCommit checks out either a branch name or a commit hash
+func checkoutBranchOrCommit(repoPath, ref string) error {
+	// Use git checkout command which can handle both branches and commit hashes
+	checkoutCmd := exec.Command("git", "checkout", ref)
+	checkoutCmd.Dir = repoPath
+	if output, err := checkoutCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to checkout '%s': %w\nOutput: %s", ref, err, string(output))
+	}
+	return nil
+}
+
 // prepareForBranchRebase checks out the base branch and creates a new temporary branch for cherry-picking.
 func prepareForBranchRebase(repoPath, baseBranchName, targetBranchName, originalBranch string) (string, error) {
 	fmt.Printf("  Checking out base '%s'...\n", baseBranchName)
-	if err := CheckoutBranch(repoPath, baseBranchName); err != nil {
+	if err := checkoutBranchOrCommit(repoPath, baseBranchName); err != nil {
 		return "", fmt.Errorf("failed to checkout base branch '%s': %w", baseBranchName, err)
 	}
 
