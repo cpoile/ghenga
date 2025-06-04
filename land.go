@@ -16,12 +16,12 @@ type LandCmd struct {
 }
 
 func (l *LandCmd) Run(ctx *kong.Context) error {
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusOutput, err := statusCmd.Output()
+	// Check if working directory is clean
+	repo, err := openGitRepo()
 	if err != nil {
-		return fmt.Errorf("failed to check git status: %w", err)
+		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	if len(strings.TrimSpace(string(statusOutput))) > 0 {
+	if err := isWorkingDirectoryClean(repo); err != nil {
 		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before landing")
 	}
 
@@ -171,7 +171,7 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 			abortCmd := exec.Command("git", "cherry-pick", "--abort")
 			abortCmd.Dir = repoPath
 			abortCmd.Run() // Ignore errors, as it might not be in a cherry-pick state
-			
+
 			// Always consider a rebase error as a fatal error in land, even if it's just a conflict pause
 			return fmt.Errorf("failed during sequential rebase of remaining tower branches: %w", err)
 		}

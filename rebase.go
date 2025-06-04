@@ -63,18 +63,16 @@ func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialR
 		return fmt.Errorf("a rebase is already in progress for tower '%s'. Resolve conflicts and run 'ghenga rebase continue' or clear the state with 'ghenga rebase cancel'", currentTower.Name)
 	}
 
-	// Check Git Status first
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	// TODO: needed?
-	statusCmd.Dir = repoPath // Ensure command runs in the correct directory
-	output, err := statusCmd.Output()
+	// Open repository to check status
+	r, err := openGitRepo()
 	if err != nil {
-		return fmt.Errorf("failed to check git status: %w", err)
+		return fmt.Errorf("failed to open repository: %w", err)
 	}
 
-	if len(strings.TrimSpace(string(output))) > 0 {
+	// Check if working directory is clean
+	if err := isWorkingDirectoryClean(r); err != nil {
 		// Check if the only changes are due to an in-progress rebase (e.g., conflicts)
-		isConflict, _ := hasConflicts(repoPath)
+		isConflict, _ := hasConflicts(r)
 		if !isConflict {
 			return fmt.Errorf("working directory is not clean. Please commit or stash your changes before starting a rebase")
 		}
@@ -436,7 +434,7 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 		return err
 	}
 
-	hasConflicts, err := hasConflicts(repoPath)
+	hasConflicts, err := hasConflicts(gitRepo)
 	if err != nil {
 		return err
 	}
@@ -759,28 +757,6 @@ func finalizeSuccessfulBranchRebase(repoPath, targetBranch, tempBranch, original
 }
 
 // Helper function: hasConflicts checks git status for unmerged paths
-func hasConflicts(repoPath string) (bool, error) {
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = repoPath
-	output, err := statusCmd.Output()
-	if err != nil {
-		// Check if the error is because we are mid-rebase (often non-zero exit code)
-		// but still want to parse the output for 'U' markers.
-		// If no output AND error, then it's likely a real error.
-		if len(output) == 0 {
-			return false, fmt.Errorf("failed to get git status: %w", err)
-		}
-		// Otherwise, proceed to parse the output even if exit code was non-zero
-	}
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		// Look for standard conflict markers (Unmerged) or Added/Deleted by both
-		if len(line) >= 2 && (line[0] == 'U' || (line[0] == 'A' && line[1] == 'A') || (line[0] == 'D' && line[1] == 'D') || (line[0] == 'R' && line[1] == 'U') || (line[0] == 'U' && line[1] == 'R')) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
 
 type RebaseUndoCmd struct {
 }
@@ -798,14 +774,12 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 		return fmt.Errorf("a rebase operation is currently paused. Please either complete it using 'ghenga rebase continue' or abort it ('git cherry-pick --abort') before attempting to undo the *previous* completed rebase")
 	}
 
-	// Check Git Status first
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = repoPath
-	statusOutput, err := statusCmd.Output()
+	// Check if working directory is clean
+	repo, err := openGitRepo()
 	if err != nil {
-		return fmt.Errorf("failed to check git status: %w", err)
+		return fmt.Errorf("failed to open repository: %w", err)
 	}
-	if len(strings.TrimSpace(string(statusOutput))) > 0 {
+	if err := isWorkingDirectoryClean(repo); err != nil {
 		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before undoing rebase")
 	}
 

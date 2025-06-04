@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -935,5 +936,375 @@ func TestSyncUndoMultiple(t *testing.T) {
 	require.Empty(t, tower.LastSynced, "LastSynced timestamp should be cleared")
 	for _, b := range tower.Branches {
 		require.Empty(t, b.PreSyncReflogID, "PreSyncReflogID should be cleared for branch %s", b.Name)
+	}
+}
+
+func TestSyncForceWithLeaseSafety(t *testing.T) {
+	// This test verifies that force-with-lease protects against overwriting
+	// changes made by others after our last fetch
+	remoteRepoPath, localRepoPath, localRepo, cleanup := setupSyncTestEnv(t)
+	defer cleanup()
+
+	branchName := "feature-force-lease-test"
+	
+	// 1. Create branch, commit, push (establish baseline)
+	wt, err := localRepo.Worktree()
+	require.NoError(t, err)
+	headRef, err := localRepo.Head()
+	require.NoError(t, err)
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   headRef.Hash(),
+		Branch: plumbing.NewBranchReferenceName(branchName),
+		Create: true,
+	})
+	require.NoError(t, err)
+	localCommitHash1 := addSingleCommit(t, localRepoPath, wt, "force-lease-1.txt", "content 1", "First commit")
+	pushRefSpec := fmt.Sprintf("%s:%s", plumbing.NewBranchReferenceName(branchName).String(), plumbing.NewBranchReferenceName(branchName).String())
+	err = localRepo.Push(&git.PushOptions{RemoteName: "origin", RefSpecs: []config.RefSpec{config.RefSpec(pushRefSpec)}})
+	if err != git.NoErrAlreadyUpToDate {
+		require.NoError(t, err)
+	}
+
+	// 2. Fetch to establish our local remote tracking reference baseline
+	fetchCmd := exec.Command("git", "fetch", "origin")
+	fetchCmd.Dir = localRepoPath
+	fetchOutput, err := fetchCmd.CombinedOutput()
+	require.NoError(t, err, "Failed to initial fetch origin: %s", string(fetchOutput))
+
+	// 3. Make divergent local commit (this will conflict with remote)
+	localCommitHash2 := addSingleCommit(t, localRepoPath, wt, "force-lease-local.txt", "local content", "Local divergent commit")
+	require.NotEqual(t, localCommitHash1, localCommitHash2)
+
+	// 4. Simulate someone else pushing to remote AFTER our fetch
+	// This creates the scenario where force-with-lease should fail because
+	// our local remote tracking ref is now stale (points to localCommitHash1)
+	// but the actual remote now points to a different commit
+	remoteCommitHash := commitDirectlyToRemote(t, remoteRepoPath, branchName, "force-lease-remote.txt", "remote content", "Remote commit by someone else")
+	require.NotEqual(t, localCommitHash2, remoteCommitHash)
+	require.NotEqual(t, localCommitHash1, remoteCommitHash) // Remote moved from our baseline
+
+	// 5. Setup ghenga config for force-push scenario
+	towerName := "force-lease-tower"
+	config, err := LoadConfig()
+	require.NoError(t, err)
+	config.Repos[0].Current = towerName
+	config.Repos[0].Towers = []*Tower{
+		{
+			Name:     towerName,
+			Branches: []Branch{{Name: branchName}},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// 6. Run sync - this should FAIL due to force-with-lease protection
+	// Since remote has changed since our last fetch, force-with-lease should reject the push
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
+
+	syncCmd := &SyncDoCmd{Remote: "origin"}
+	output, err := CaptureOutput(func() error {
+		return syncCmd.Run(nil)
+	})
+	
+	t.Logf("Sync output (should show force-with-lease failure):\n%s", output)
+	
+	// Check if it properly detected divergence and attempted force-push
+	if strings.Contains(output, "Marked for force-push") {
+		// Expected path: force-push should fail due to force-with-lease protection
+		require.Error(t, err, "Sync should fail due to force-with-lease protection when branches diverged")
+		require.Contains(t, output, "Error force-pushing branch", "Output should show force-push error")
+		require.Contains(t, output, "Failed to push (force): 1", "Output should show force push failure count")
+		t.Logf("✅ Force-with-lease correctly rejected push!")
+	} else {
+		// Unexpected: branch was not detected as diverged
+		t.Logf("⚠️  Branch was not detected as diverged. Output:\n%s", output)
+		require.Fail(t, "Branch should have been detected as diverged and marked for force-push")
+	}
+}
+
+func TestSyncPullNonExistentRemote(t *testing.T) {
+	// This test verifies sync behavior when a branch exists locally 
+	// but the corresponding remote branch doesn't exist (deleted, never pushed, etc.)
+	_, localRepoPath, localRepo, cleanup := setupSyncTestEnv(t)
+	defer cleanup()
+
+	branchName := "feature-no-remote"
+	
+	// 1. Create a local branch with commits but DON'T push it
+	wt, err := localRepo.Worktree()
+	require.NoError(t, err)
+	headRef, err := localRepo.Head()
+	require.NoError(t, err)
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   headRef.Hash(),
+		Branch: plumbing.NewBranchReferenceName(branchName),
+		Create: true,
+	})
+	require.NoError(t, err)
+	localCommitHash := addSingleCommit(t, localRepoPath, wt, "no-remote.txt", "content", "Local commit, no remote")
+
+	// 2. Create another branch that DOES exist on remote for comparison
+	anotherBranchName := "feature-has-remote"
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   headRef.Hash(),
+		Branch: plumbing.NewBranchReferenceName(anotherBranchName),
+		Create: true,
+	})
+	require.NoError(t, err)
+	_ = addSingleCommit(t, localRepoPath, wt, "has-remote.txt", "content", "Commit that will be pushed")
+	
+	// Push the second branch so it has a remote
+	pushRefSpec := fmt.Sprintf("%s:%s", plumbing.NewBranchReferenceName(anotherBranchName).String(), plumbing.NewBranchReferenceName(anotherBranchName).String())
+	err = localRepo.Push(&git.PushOptions{RemoteName: "origin", RefSpecs: []config.RefSpec{config.RefSpec(pushRefSpec)}})
+	if err != git.NoErrAlreadyUpToDate {
+		require.NoError(t, err)
+	}
+
+	// 3. Setup ghenga config with BOTH branches
+	towerName := "no-remote-tower"
+	config, err := LoadConfig()
+	require.NoError(t, err)
+	config.Repos[0].Current = towerName
+	config.Repos[0].Towers = []*Tower{
+		{
+			Name: towerName,
+			Branches: []Branch{
+				{Name: branchName},        // This one has NO remote
+				{Name: anotherBranchName}, // This one HAS remote
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// 4. Run sync - should handle missing remote branch gracefully
+	restoreStdin := mockInput("n") // Cancel to just see the analysis
+	defer restoreStdin()
+
+	syncCmd := &SyncDoCmd{Remote: "origin"}
+	output, err := CaptureOutput(func() error {
+		return syncCmd.Run(nil)
+	})
+	
+	t.Logf("Sync output (should handle missing remote gracefully):\n%s", output)
+	
+	// 5. Verify behavior
+	// The branch with no remote should be skipped or marked appropriately
+	require.Contains(t, output, fmt.Sprintf("Branch '%s': Does not exist on remote", branchName), 
+		"Should detect and report missing remote branch")
+	
+	// The branch with remote should be processed normally  
+	require.Contains(t, output, fmt.Sprintf("Branch '%s':", anotherBranchName),
+		"Should process branch that has remote normally")
+	
+	// Should not crash or error on the missing remote branch
+	if err != nil {
+		t.Logf("Sync failed, but checking if it's due to cancellation: %v", err)
+		// If it failed due to cancellation (user said 'n'), that's expected
+		require.Contains(t, output, "operation cancelled", "If sync failed, should be due to user cancellation")
+	}
+	
+	// Verify no remote tracking ref was created for the non-existent remote branch
+	nonExistentRemoteRef := plumbing.NewRemoteReferenceName("origin", branchName)
+	_, err = localRepo.Reference(nonExistentRemoteRef, true)
+	require.Error(t, err, "Should not have remote tracking ref for branch that doesn't exist on remote")
+	
+	// Verify the local branch still exists and hasn't been modified
+	localBranchRef, err := localRepo.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	require.NoError(t, err, "Local branch should still exist")
+	require.Equal(t, localCommitHash, localBranchRef.Hash(), "Local branch should be unchanged")
+}
+
+func TestSyncPullNonFastForward(t *testing.T) {
+	// This test verifies sync behavior when pulling would require a merge (not fast-forward)
+	// Our sync logic uses Force: false for pulls, so this should fail gracefully
+	remoteRepoPath, localRepoPath, localRepo, cleanup := setupSyncTestEnv(t)
+	defer cleanup()
+
+	branchName := "feature-non-ff"
+	
+	// 1. Create branch, commit, push (establish baseline)
+	wt, err := localRepo.Worktree()
+	require.NoError(t, err)
+	headRef, err := localRepo.Head()
+	require.NoError(t, err)
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash:   headRef.Hash(),
+		Branch: plumbing.NewBranchReferenceName(branchName),
+		Create: true,
+	})
+	require.NoError(t, err)
+	baseCommitHash := addSingleCommit(t, localRepoPath, wt, "base.txt", "base content", "Base commit")
+	
+	// Push the base commit
+	pushRefSpec := fmt.Sprintf("%s:%s", plumbing.NewBranchReferenceName(branchName).String(), plumbing.NewBranchReferenceName(branchName).String())
+	err = localRepo.Push(&git.PushOptions{RemoteName: "origin", RefSpecs: []config.RefSpec{config.RefSpec(pushRefSpec)}})
+	if err != git.NoErrAlreadyUpToDate {
+		require.NoError(t, err)
+	}
+
+	// 2. Add DIFFERENT commits locally and remotely (creating non-fast-forward scenario)
+	
+	// Local commit
+	localCommitHash := addSingleCommit(t, localRepoPath, wt, "local.txt", "local content", "Local commit - non-FF")
+	require.NotEqual(t, baseCommitHash, localCommitHash)
+
+	// Remote commit (different from local)
+	remoteCommitHash := commitDirectlyToRemote(t, remoteRepoPath, branchName, "remote.txt", "remote content", "Remote commit - non-FF")
+	require.NotEqual(t, baseCommitHash, remoteCommitHash)
+	require.NotEqual(t, localCommitHash, remoteCommitHash)
+
+	// 3. Verify the scenario is set up correctly: 
+	// - Local has: base -> local
+	// - Remote has: base -> remote  
+	// - Pulling would require merge (not fast-forward)
+
+	// 4. Setup ghenga config
+	towerName := "non-ff-tower"
+	config, err := LoadConfig()
+	require.NoError(t, err)
+	config.Repos[0].Current = towerName
+	config.Repos[0].Towers = []*Tower{
+		{
+			Name:     towerName,
+			Branches: []Branch{{Name: branchName}},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// 5. Run sync - this should detect the issue and NOT attempt a pull
+	// because our fetch will show the branches are diverged, not that remote is ahead
+	restoreStdin := mockInput("n") // Cancel if it asks for confirmation
+	defer restoreStdin()
+
+	syncCmd := &SyncDoCmd{Remote: "origin"}
+	output, err := CaptureOutput(func() error {
+		return syncCmd.Run(nil)
+	})
+	
+	t.Logf("Sync output (should detect divergence, not attempt non-FF pull):\n%s", output)
+	
+	// 6. Verify behavior: Should detect DIVERGENCE, not "remote ahead"
+	// Because both local and remote have moved from the base, it's diverged, not ahead
+	require.Contains(t, output, fmt.Sprintf("Branch '%s': Marked for force-push (diverged", branchName), 
+		"Should detect divergence, not remote ahead requiring pull")
+	
+	// Should NOT contain pull-related messages
+	require.NotContains(t, output, "Marked for pull", "Should not try to pull diverged branches")
+	require.NotContains(t, output, "Executing pulls", "Should not attempt pull operations")
+	
+	// Verify local branch is unchanged (no failed pull attempt)
+	localBranchRef, err := localRepo.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	require.NoError(t, err, "Local branch should still exist")
+	require.Equal(t, localCommitHash, localBranchRef.Hash(), "Local branch should be unchanged - no pull attempted")
+}
+
+func TestSyncSpecialBranchNames(t *testing.T) {
+	// This test verifies sync behavior with branch names containing special characters
+	// Our ref name construction should handle these correctly
+	_, localRepoPath, localRepo, cleanup := setupSyncTestEnv(t)
+	defer cleanup()
+
+	// Test various special characters that are VALID in git branch names
+	testBranches := []string{
+		"feature/my-feature",    // Slashes (very common)
+		"release-v1.2.3",        // Dots and hyphens
+		"hotfix_urgent_fix",     // Underscores
+		"feat-branch-123",       // Normal case for comparison  
+		"feature/sub/deep",      // Multiple slashes
+		"fix.urgent.123",        // Multiple dots
+	}
+
+	var createdCommits []plumbing.Hash
+	
+	// 1. Create branches with special names and commits
+	wt, err := localRepo.Worktree()
+	require.NoError(t, err)
+	headRef, err := localRepo.Head()
+	require.NoError(t, err)
+	baseHash := headRef.Hash()
+
+	for i, branchName := range testBranches {
+		t.Logf("Creating branch with special name: '%s'", branchName)
+		
+		err = wt.Checkout(&git.CheckoutOptions{
+			Hash:   baseHash,
+			Branch: plumbing.NewBranchReferenceName(branchName),
+			Create: true,
+		})
+		require.NoError(t, err, "Should be able to create branch '%s'", branchName)
+		
+		commitHash := addSingleCommit(t, localRepoPath, wt, 
+			fmt.Sprintf("file-%d.txt", i), 
+			fmt.Sprintf("content for %s", branchName), 
+			fmt.Sprintf("Commit for %s", branchName))
+		createdCommits = append(createdCommits, commitHash)
+		
+		// Push each branch to establish remote tracking
+		pushRefSpec := fmt.Sprintf("%s:%s", 
+			plumbing.NewBranchReferenceName(branchName).String(), 
+			plumbing.NewBranchReferenceName(branchName).String())
+		err = localRepo.Push(&git.PushOptions{
+			RemoteName: "origin", 
+			RefSpecs:   []config.RefSpec{config.RefSpec(pushRefSpec)},
+		})
+		if err != git.NoErrAlreadyUpToDate {
+			require.NoError(t, err, "Should be able to push branch '%s'", branchName)
+		}
+	}
+
+	// 2. Setup ghenga config with all special branch names
+	towerName := "special-names-tower"
+	config, err := LoadConfig()
+	require.NoError(t, err)
+	config.Repos[0].Current = towerName
+	
+	var branches []Branch
+	for _, name := range testBranches {
+		branches = append(branches, Branch{Name: name})
+	}
+	
+	config.Repos[0].Towers = []*Tower{
+		{
+			Name:     towerName,
+			Branches: branches,
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// 3. Run sync - should handle all special branch names without errors
+	syncCmd := &SyncDoCmd{Remote: "origin"}
+	output, err := CaptureOutput(func() error {
+		return syncCmd.Run(nil)
+	})
+	
+	// Should complete without errors
+	require.NoError(t, err, "Sync should handle special branch names without errors")
+	
+	t.Logf("Sync output with special branch names:\n%s", output)
+	
+	// 4. Verify all branches were processed correctly
+	for _, branchName := range testBranches {
+		// Should appear in output without errors
+		require.Contains(t, output, fmt.Sprintf("Branch '%s':", branchName), 
+			"Branch '%s' should be processed", branchName)
+		
+		// Should not have error messages for this branch
+		require.NotContains(t, output, fmt.Sprintf("Error checking status.*%s", branchName),
+			"Should not have status check errors for branch '%s'", branchName)
+	}
+	
+	// 5. Verify our ref name construction worked by checking remote tracking refs exist
+	for _, branchName := range testBranches {
+		remoteTrackingRef := plumbing.NewRemoteReferenceName("origin", branchName)
+		_, err := localRepo.Reference(remoteTrackingRef, true)
+		require.NoError(t, err, "Remote tracking ref should exist for branch '%s'", branchName)
+		
+		localBranchRef := plumbing.NewBranchReferenceName(branchName)
+		_, err = localRepo.Reference(localBranchRef, true)
+		require.NoError(t, err, "Local branch ref should exist for branch '%s'", branchName)
 	}
 }

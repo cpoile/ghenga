@@ -266,15 +266,22 @@ func detectDefaultBranch(r *git.Repository) string {
 // updateLocalBranchFromRemote fetches remote and updates local branch
 func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName, localBranch, currentBranchToPreserve string) error {
 	fmt.Printf("    Fetching remote '%s'...\n", remoteName)
-	fetchCmd := exec.Command("git", "fetch", remoteName)
-	fetchCmd.Dir = repoPath
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git fetch failed: %w\nOutput: %s", err, string(output))
+
+	// Get the remote
+	remote, err := r.Remote(remoteName)
+	if err != nil {
+		return fmt.Errorf("failed to get remote '%s': %w", remoteName, err)
+	}
+
+	// Fetch from the remote
+	fetchOptions := &git.FetchOptions{}
+	if err := remote.Fetch(fetchOptions); err != nil && err != git.NoErrAlreadyUpToDate {
+		return fmt.Errorf("failed to fetch from remote '%s': %w", remoteName, err)
 	}
 
 	// Ensure the branch we want to update exists locally
 	localRefName := plumbing.NewBranchReferenceName(localBranch)
-	_, err := r.Reference(localRefName, true)
+	_, err = r.Reference(localRefName, true)
 	if err != nil {
 		return fmt.Errorf("local base branch '%s' not found: %w", localBranch, err)
 	}
@@ -326,4 +333,54 @@ func getCurrentBranchName(r *git.Repository) (string, error) {
 		return "", fmt.Errorf("HEAD is detached")
 	}
 	return headRef.Name().Short(), nil
+}
+
+// isWorkingDirectoryClean checks if the working directory has no uncommitted changes
+func isWorkingDirectoryClean(r *git.Repository) error {
+	wt, err := r.Worktree()
+	if err != nil {
+		return fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	status, err := wt.Status()
+	if err != nil {
+		return fmt.Errorf("failed to get working directory status: %w", err)
+	}
+
+	if !status.IsClean() {
+		return fmt.Errorf("working directory is not clean. Please commit or stash your changes")
+	}
+	return nil
+}
+
+// hasConflicts checks if the working directory has merge conflicts using git command
+// TODO: Replace with go-git when we understand the status codes better
+func hasConflicts(r *git.Repository) (bool, error) {
+	// Get the worktree root to run git command in correct directory
+	wt, err := r.Worktree()
+	if err != nil {
+		return false, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	// Use git status command for now since go-git status codes are unclear
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = wt.Filesystem.Root()
+	output, err := statusCmd.Output()
+	if err != nil {
+		// Check if the error is because we are mid-rebase (often non-zero exit code)
+		// but still want to parse the output for 'U' markers.
+		// If no output AND error, then it's likely a real error.
+		if len(output) == 0 {
+			return false, fmt.Errorf("failed to get git status: %w", err)
+		}
+		// Otherwise, proceed to parse the output even if exit code was non-zero
+	}
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		// Look for standard conflict markers (Unmerged) or Added/Deleted by both
+		if len(line) >= 2 && (line[0] == 'U' || (line[0] == 'A' && line[1] == 'A') || (line[0] == 'D' && line[1] == 'D') || (line[0] == 'R' && line[1] == 'U') || (line[0] == 'U' && line[1] == 'R')) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

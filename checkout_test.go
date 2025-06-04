@@ -113,25 +113,23 @@ branch refs/heads/bugfix-branch
 `
 
 	// Test finding existing branch
-	dir, err := parseWorktreeDir(output, "feature-branch")
-	require.NoError(t, err)
+	dir, found := parseWorktreeDir(output, "feature-branch")
+	require.True(t, found)
 	require.Equal(t, "/Users/test/feature-worktree", dir)
 
 	// Test finding another existing branch
-	dir, err = parseWorktreeDir(output, "bugfix-branch")
-	require.NoError(t, err)
+	dir, found = parseWorktreeDir(output, "bugfix-branch")
+	require.True(t, found)
 	require.Equal(t, "/Users/test/bugfix-worktree", dir)
 
 	// Test non-existent branch
-	_, err = parseWorktreeDir(output, "nonexistent-branch")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "no worktree found")
+	_, found = parseWorktreeDir(output, "nonexistent-branch")
+	require.False(t, found)
 }
 
 func TestParseWorktreeDir_EmptyOutput(t *testing.T) {
-	_, err := parseWorktreeDir("", "any-branch")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "no worktree found")
+	_, found := parseWorktreeDir("", "any-branch")
+	require.False(t, found)
 }
 
 func TestParseWorktreeDir_MalformedOutput(t *testing.T) {
@@ -139,9 +137,8 @@ func TestParseWorktreeDir_MalformedOutput(t *testing.T) {
 invalid line
 branch refs/heads/feature-branch`
 
-	_, err := parseWorktreeDir(output, "feature-branch")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "no worktree found")
+	_, found := parseWorktreeDir(output, "feature-branch")
+	require.False(t, found)
 }
 
 func TestCheckoutBranch_DirtyWorkingDir(t *testing.T) {
