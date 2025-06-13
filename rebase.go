@@ -586,7 +586,7 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 			return fmt.Errorf("currently on target branch '%s', expected temporary branch '%s'. Aborting continue. Did you 'git cherry-pick --abort'?", state.TargetBranch, state.TemporaryBranch)
 		}
 		// Otherwise, it's some other branch, which is definitely wrong.
-		return fmt.Errorf("internal state error: Expected to be on temporary rebase branch '%s', but currently on '%s'. Aborting continue.", state.TemporaryBranch, currentGitBranch)
+		return fmt.Errorf("internal state error: Expected to be on temporary rebase branch '%s', but currently on '%s'. This may happen if the rebase was interrupted and the branch was restored. Try 'ghenga rebase cancel' to clear the state, then restart the operation", state.TemporaryBranch, currentGitBranch)
 	}
 
 	// Try to continue the cherry-pick operation
@@ -823,21 +823,77 @@ func prepareForBranchRebase(repoPath, baseBranchName, targetBranchName, original
 	return tempBranch, nil
 }
 
+// isGitLockFileError checks if the error output indicates a git lock file issue
+func isGitLockFileError(output string) bool {
+	return strings.Contains(output, "index.lock") &&
+		(strings.Contains(output, "File exists") || strings.Contains(output, "Another git process"))
+}
+
+// cherryPickWithRetry attempts to cherry-pick a commit with retry logic for lock file errors
+func cherryPickWithRetry(repoPath, commit string) ([]byte, error) {
+	maxRetries := 10
+	baseSleepMs := 100
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		cherryPickCmd := exec.Command("git", "cherry-pick", commit)
+		cherryPickCmd.Dir = repoPath
+		output, err := cherryPickCmd.CombinedOutput()
+
+		if err == nil {
+			return output, nil // Success
+		}
+
+		// Check if this is a lock file error and we haven't exhausted retries
+		if attempt < maxRetries && isGitLockFileError(string(output)) {
+			sleepMs := baseSleepMs * (1 << attempt) // Exponential backoff
+			if sleepMs > 2000 {
+				sleepMs = 2000 // Cap at 2 seconds
+			}
+
+			fmt.Printf("    Git lock file detected, retrying in %dms (attempt %d/%d)...\n",
+				sleepMs, attempt+1, maxRetries+1)
+			time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+			continue
+		}
+
+		// Either not a lock file error, or we've exhausted retries
+		if isGitLockFileError(string(output)) {
+			return output, fmt.Errorf("git lock file persisted after %d retries: %w", maxRetries+1, err)
+		}
+
+		return output, err // Return original error
+	}
+
+	// Should never reach here, but just in case
+	return nil, fmt.Errorf("unexpected error in cherry-pick retry logic")
+}
+
 // applyCommitsAndHandlePause performs the cherry-pick loop for a given branch.
 // It saves state and returns errRebasePaused if a conflict occurs.
 func applyCommitsAndHandlePause(config *Config, tower *Tower, repoPath string, branchInfo BranchRebaseInfo, tempBranch, originalBranch string, remainingBranchInfos []BranchRebaseInfo, startIndex int) error {
 	for i := startIndex; i < len(branchInfo.UniqueCommits); i++ {
 		commit := branchInfo.UniqueCommits[i]
 		fmt.Printf("  Applying commit %s (%d/%d)...\n", commit[:7], i+1, len(branchInfo.UniqueCommits))
-		cherryPickCmd := exec.Command("git", "cherry-pick", commit)
-		cherryPickCmd.Dir = repoPath
-		if output, err := cherryPickCmd.CombinedOutput(); err != nil {
+
+		output, err := cherryPickWithRetry(repoPath, commit)
+		if err != nil {
 			// CONFLICT / ERROR during cherry-pick
 			conflictColor := color.New(color.FgRed).Add(color.Bold)
 			conflictColor.Printf("\n!! Cherry-pick failed for commit %s\n", commit)
 			fmt.Printf("Git output:\n%s\n", string(output))
-			conflictColor.Println("Rebase paused.")
-			fmt.Println("Please resolve the conflicts, then stage the changes using 'git add <file>...'.")
+
+			// Provide different guidance based on error type
+			if isGitLockFileError(string(output)) {
+				conflictColor.Println("Git lock file error persisted after retries.")
+				fmt.Println("Another git process may be running or crashed. Check for:")
+				fmt.Println("  - Other git commands running in this repository")
+				fmt.Println("  - IDE/editor git operations in progress")
+				fmt.Println("  - If all else fails, manually remove .git/index.lock")
+			} else {
+				conflictColor.Println("Rebase paused.")
+				fmt.Println("Please resolve the conflicts, then stage the changes using 'git add <file>...'.")
+			}
+
 			fmt.Println("Once resolved and all files are staged, run 'ghenga rebase continue'.")
 			fmt.Println("To abort the rebase, run 'git cherry-pick --abort' and then manually clean up branches if needed.")
 

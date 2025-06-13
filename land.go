@@ -45,6 +45,14 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 	}
 	defer func() {
 		if originalBranchName != "" {
+			// Check if rebase is paused - if so, don't restore original branch
+			// because user needs to stay on temporary branch for 'rebase continue'
+			_, _, reloadedTower, _, reloadErr := loadRepoInfoAndCurrentTower()
+			if reloadErr == nil && reloadedTower.RebaseState != nil && reloadedTower.RebaseState.IsInProgress {
+				// Rebase is paused, don't restore original branch
+				return
+			}
+
 			fmt.Printf("\nRestoring original branch: %s\n", originalBranchName)
 			checkoutCmd := exec.Command("git", "checkout", originalBranchName)
 			checkoutCmd.Dir = repoPath
@@ -81,12 +89,34 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 	}
 	fmt.Printf("  Remote branch '%s/%s' not found, assuming merged and deleted.\n", l.Remote, bottomBranch.Name)
 
-	fmt.Println("\nStarting landing sequence...")
-
-	// --- Update base branch ---
+	// --- Validate base branch before confirmation ---
 	if currentTower.Base == "" {
 		return fmt.Errorf("tower '%s' has no base branch set. Use 'ghenga base <branch-name>' to set it", currentTower.Name)
 	}
+
+	// --- Confirmation step ---
+	remainingBranchCount := len(currentTower.Branches) - 1
+	fmt.Printf("\nLanding will perform the following actions:\n")
+	fmt.Printf("  - Remove branch '%s' from tower '%s'\n", bottomBranch.Name, currentTower.Name)
+	if remainingBranchCount > 0 {
+		fmt.Printf("  - Rebase %d remaining branch(es) onto updated base '%s'\n", remainingBranchCount, currentTower.Base)
+		fmt.Printf("  - This will change commit hashes and require force-push if branches exist on remote\n")
+	} else {
+		fmt.Printf("  - No remaining branches to rebase (tower will be empty)\n")
+	}
+	fmt.Printf("  - You can undo this operation with 'ghenga rebase undo'\n")
+
+	fmt.Print("\nProceed with landing? [y/N]: ")
+	var response string
+	fmt.Scanln(&response)
+	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+		fmt.Println("Landing operation cancelled.")
+		return nil
+	}
+
+	fmt.Println("\nStarting landing sequence...")
+
+	// --- Update base branch ---
 	fmt.Printf("  Updating base branch '%s' from remote '%s'...\n", currentTower.Base, l.Remote)
 	if err := updateLocalBranchFromRemote(repoPath, r, l.Remote, currentTower.Base, originalBranchName); err != nil {
 		return fmt.Errorf("failed to update base branch '%s': %w", currentTower.Base, err)
@@ -115,9 +145,9 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 
 	// Use rebase infrastructure for all remaining branches (handles single and multiple uniformly)
 	fmt.Printf("  Rebasing remaining branches in tower '%s'...\n", currentTower.Name)
-	
+
 	// Use RebaseModeReset with firstBranchExcludeBase to:
-	// - Rebase first remaining branch onto currentTower.Base, excluding commits from landedBranchName  
+	// - Rebase first remaining branch onto currentTower.Base, excluding commits from landedBranchName
 	// - Rebase subsequent branches onto their predecessors
 	// This gives us state tracking, undo support, and conflict handling
 	err = rebaseTowerWithMode(RebaseModeReset, true, "", "", currentTower.Base, landedBranchName)
@@ -126,7 +156,7 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 		fmt.Printf("\nLand operation paused due to rebase conflicts.\n")
 		fmt.Printf("Resolve conflicts and run 'ghenga rebase continue' to complete the landing,\n")
 		fmt.Printf("or run 'ghenga rebase cancel' to abort and return to the previous state.\n")
-		
+
 		// Reload config to get updated rebase state for error message
 		_, _, reloadedTower, _, reloadErr := loadRepoInfoAndCurrentTower()
 		if reloadErr == nil && reloadedTower.RebaseState != nil {

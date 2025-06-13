@@ -93,6 +93,10 @@ func TestLand_HappyPath(t *testing.T) {
 	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(baseBranchName)})
 	require.NoError(t, err)
 
+	// Mock user input to confirm landing
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
+
 	output, err := CaptureOutput(func() error {
 		// Use a mock context
 		parser := kong.Must(&CLI{})
@@ -589,6 +593,11 @@ func TestLandBaseUpdateSuccess(t *testing.T) {
 	landCmd := &LandCmd{Remote: remoteName}
 	parser := kong.Must(&CLI{})
 	kongCtx, _ := parser.Parse([]string{"land"})
+
+	// Mock user input to confirm landing
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
+
 	output, err := CaptureOutput(func() error { return landCmd.Run(kongCtx) })
 	t.Log("Land command output:\n", output)
 	require.NoError(t, err, "land command failed")
@@ -718,6 +727,10 @@ func TestLandRebaseOntoConflict(t *testing.T) {
 	landCmd := &LandCmd{Remote: remoteName}
 	parser := kong.Must(&CLI{})
 	kongCtx, _ := parser.Parse([]string{"land"})
+
+	// Mock user input to confirm landing
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
 
 	output, err := CaptureOutput(func() error { return landCmd.Run(kongCtx) })
 	t.Log("Land command output (conflict expected):\n", output)
@@ -856,6 +869,10 @@ func TestLandSequentialRebaseConflict(t *testing.T) {
 	parser := kong.Must(&CLI{})
 	kongCtx, _ := parser.Parse([]string{"land"})
 
+	// Mock user input to confirm landing
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
+
 	output, err := CaptureOutput(func() error { return landCmd.Run(kongCtx) })
 	t.Log("Land command output (seq conflict expected):\n", output)
 	require.Error(t, err, "Expected land command to fail due to sequential rebase conflict")
@@ -957,6 +974,11 @@ func TestLandLastBranch(t *testing.T) {
 	landCmd := &LandCmd{Remote: remoteName}
 	parser := kong.Must(&CLI{})
 	kongCtx, _ := parser.Parse([]string{"land"})
+
+	// Mock user input to confirm landing
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
+
 	output, err := CaptureOutput(func() error { return landCmd.Run(kongCtx) })
 	t.Log("Land command output (last branch):\n", output)
 	require.NoError(t, err, "land command failed for last branch")
@@ -1072,6 +1094,11 @@ func TestLandSequenceWithSharedFile(t *testing.T) {
 	// Checkout base branch first
 	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(baseBranchName)})
 	require.NoError(t, err)
+
+	// Mock user input to confirm landing
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
+
 	output, err := CaptureOutput(func() error { return landCmd.Run(kongCtx) })
 	t.Log(output)
 	require.NoError(t, err, "Land A failed")
@@ -1089,9 +1116,9 @@ func TestLandSequenceWithSharedFile(t *testing.T) {
 
 	// --- Sync remaining branches after first land ---
 	// After landing A, remaining branches B and C have been rebased and need to be synced to remote
-	restoreStdin := mockInput("y") // Confirm sync operation
-	defer restoreStdin()
-	
+	restoreStdinSync := mockInput("y") // Confirm sync operation
+	defer restoreStdinSync()
+
 	syncDoCmd := &SyncDoCmd{Remote: remoteName}
 	syncParser := kong.Must(&CLI{})
 	syncKongCtx, _ := syncParser.Parse([]string{"sync"})
@@ -1111,6 +1138,11 @@ func TestLandSequenceWithSharedFile(t *testing.T) {
 	// Checkout base branch first
 	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(baseBranchName)})
 	require.NoError(t, err)
+
+	// Mock user input to confirm landing
+	restoreStdin2 := mockInput("y")
+	defer restoreStdin2()
+
 	output, err = CaptureOutput(func() error { return landCmd.Run(kongCtx) })
 	t.Log(output)
 	require.NoError(t, err, "Land B failed")
@@ -1137,6 +1169,11 @@ func TestLandSequenceWithSharedFile(t *testing.T) {
 	// Checkout base branch first
 	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(baseBranchName)})
 	require.NoError(t, err)
+
+	// Mock user input to confirm landing
+	restoreStdin3 := mockInput("y")
+	defer restoreStdin3()
+
 	output, err = CaptureOutput(func() error { return landCmd.Run(kongCtx) })
 	t.Log(output)
 	require.NoError(t, err, "Land C failed")
