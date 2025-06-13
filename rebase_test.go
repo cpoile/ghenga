@@ -413,13 +413,7 @@ func resolveConflict(t *testing.T, repoPath, filename, resolvedContent string) {
 
 // Helper to check git status for conflicts
 func checkHasConflicts(t *testing.T, repoPath string) bool {
-	// Open repository from the path
-	r, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
-	require.NoError(t, err, "Failed to open repository")
-
-	hasConflicts, err := hasConflicts(r)
+	hasConflicts, err := hasConflicts(repoPath) // Use the actual function from rebase.go
 	require.NoError(t, err, "Error checking git conflict status")
 	return hasConflicts
 }

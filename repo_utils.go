@@ -266,22 +266,15 @@ func detectDefaultBranch(r *git.Repository) string {
 // updateLocalBranchFromRemote fetches remote and updates local branch
 func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName, localBranch, currentBranchToPreserve string) error {
 	fmt.Printf("    Fetching remote '%s'...\n", remoteName)
-
-	// Get the remote
-	remote, err := r.Remote(remoteName)
-	if err != nil {
-		return fmt.Errorf("failed to get remote '%s': %w", remoteName, err)
-	}
-
-	// Fetch from the remote
-	fetchOptions := &git.FetchOptions{}
-	if err := remote.Fetch(fetchOptions); err != nil && err != git.NoErrAlreadyUpToDate {
-		return fmt.Errorf("failed to fetch from remote '%s': %w", remoteName, err)
+	fetchCmd := exec.Command("git", "fetch", remoteName)
+	fetchCmd.Dir = repoPath
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch failed: %w\nOutput: %s", err, string(output))
 	}
 
 	// Ensure the branch we want to update exists locally
 	localRefName := plumbing.NewBranchReferenceName(localBranch)
-	_, err = r.Reference(localRefName, true)
+	_, err := r.Reference(localRefName, true)
 	if err != nil {
 		return fmt.Errorf("local base branch '%s' not found: %w", localBranch, err)
 	}
@@ -359,17 +352,10 @@ func isWorkingDirectoryClean(r *git.Repository) error {
 	return nil
 }
 
-// hasConflicts checks if the working directory has merge conflicts using git command
-func hasConflicts(r *git.Repository) (bool, error) {
-	// Get the worktree root to run git command in correct directory
-	wt, err := r.Worktree()
-	if err != nil {
-		return false, fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	// Use git status command for now since go-git status codes are unclear
+// Helper function: hasConflicts checks git status for unmerged paths
+func hasConflicts(repoPath string) (bool, error) {
 	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = wt.Filesystem.Root()
+	statusCmd.Dir = repoPath
 	output, err := statusCmd.Output()
 	if err != nil {
 		// Check if the error is because we are mid-rebase (often non-zero exit code)

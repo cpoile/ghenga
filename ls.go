@@ -158,8 +158,8 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 				branchColor.Printf("  %s", branch.Name)
 			}
 
-			// Check push status (automatically determines correct push remote)
-			pushStatus, _, _, statusErr := GetBranchPushStatus(r, "", branch.Name)
+			// Using "origin" as the default remote for status check
+			pushStatus, _, _, statusErr := GetBranchPushStatus(r, "origin", branch.Name)
 			statusString := ""
 			if statusErr != nil {
 				statusString = " (status check failed)"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
 	"slices"
@@ -9,8 +10,6 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
-	"github.com/go-git/go-git/v5"
-	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
@@ -30,12 +29,12 @@ type SyncDoCmd struct {
 
 // Run executes the sync command.
 func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
-	// Check if working directory is clean
-	r, err := openGitRepo()
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusOutput, err := statusCmd.Output()
 	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+		return fmt.Errorf("failed to check git status: %w", err)
 	}
-	if err := isWorkingDirectoryClean(r); err != nil {
+	if len(strings.TrimSpace(string(statusOutput))) > 0 {
 		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before syncing")
 	}
 
@@ -230,63 +229,19 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 				continue
 			}
 
-			// Re-open repository from current directory after checkout
-			currentRepo, err := openGitRepo()
+			// Attempt fast-forward pull
+			pullCmd := exec.Command("git", "pull", cmd.Remote, branchName, "--ff-only")
+			pullCmd.Dir = repoPath
+			output, err := pullCmd.CombinedOutput()
+			pullOutput := strings.TrimSpace(string(output))
+
 			if err != nil {
 				failedPullCount++
-				errorColor.Printf("    Error re-opening repository for branch '%s': %s\n", branchName, err)
-				errorCount++
-				continue
-			}
-
-			// Get branch hash before pull
-			branchRef, err := currentRepo.Reference(plumbing.NewBranchReferenceName(branchName), true)
-			if err != nil {
-				failedPullCount++
-				errorColor.Printf("    Error getting branch reference for '%s': %s\n", branchName, err)
-				errorCount++
-				continue
-			}
-			hashBeforePull := branchRef.Hash()
-
-			// Attempt fast-forward pull using go-git
-			wt, err := currentRepo.Worktree()
-			if err != nil {
-				failedPullCount++
-				errorColor.Printf("    Error getting worktree for branch '%s': %s\n", branchName, err)
-				errorCount++
-				continue
-			}
-
-			pullOptions := &git.PullOptions{
-				RemoteName:    cmd.Remote,
-				ReferenceName: plumbing.NewBranchReferenceName(branchName),
-				SingleBranch:  true,
-				Force:         false, // Fast-forward only
-			}
-
-			err = wt.Pull(pullOptions)
-			if err != nil && err != git.NoErrAlreadyUpToDate {
-				failedPullCount++
-				errorColor.Printf("    Error pulling branch '%s': %s\n", branchName, err)
+				errorColor.Printf("    Error pulling branch '%s': %s\n    Output: %s\n", branchName, err, pullOutput)
 				errorCount++
 			} else {
-				// Get branch hash after pull to check if it changed
-				branchRefAfter, err := currentRepo.Reference(plumbing.NewBranchReferenceName(branchName), true)
-				if err != nil {
-					failedPullCount++
-					errorColor.Printf("    Error getting branch reference after pull for '%s': %s\n", branchName, err)
-					errorCount++
-					continue
-				}
-				hashAfterPull := branchRefAfter.Hash()
-
 				successPullCount++
-				if hashBeforePull == hashAfterPull {
-					successColor.Printf("    Successfully pulled branch '%s'\n", branchName)
-				} else {
-					successColor.Printf("    Successfully pulled branch '%s' (Fast-forward)\n", branchName)
-				}
+				successColor.Printf("    Successfully pulled branch '%s'\n    Output: %s\n", branchName, pullOutput)
 			}
 		}
 	}
@@ -296,18 +251,23 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 		fmt.Printf("\nExecuting normal pushes for %d branches...\n", len(branchesToNormalPush))
 		for _, branchName := range branchesToNormalPush {
 			fmt.Printf("  Pushing branch '%s'...\n", branchName)
+			gitPushCmd := exec.Command("git", "push", cmd.Remote, branchName)
+			gitPushCmd.Dir = repoPath
+			var pushStdout, pushStderr bytes.Buffer
+			gitPushCmd.Stdout = &pushStdout
+			gitPushCmd.Stderr = &pushStderr
 
-			// Create push options for the specific branch
-			refSpec := gitconfig.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", branchName, branchName))
-			pushOptions := &git.PushOptions{
-				RemoteName: cmd.Remote,
-				RefSpecs:   []gitconfig.RefSpec{refSpec},
-			}
-
-			err = r.Push(pushOptions)
-			if err != nil && err != git.NoErrAlreadyUpToDate {
+			err = gitPushCmd.Run()
+			if err != nil {
 				failedNormalCount++
-				errorColor.Printf("    Error pushing branch '%s': %s\n", branchName, err)
+				errMsg := strings.TrimSpace(pushStderr.String())
+				if errMsg == "" {
+					errMsg = strings.TrimSpace(pushStdout.String())
+				}
+				if errMsg == "" {
+					errMsg = err.Error()
+				}
+				errorColor.Printf("    Error pushing branch '%s': %s\n", branchName, errMsg)
 				errorCount++
 			} else {
 				successNormalCount++
@@ -321,32 +281,25 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 		fmt.Printf("\nExecuting force-pushes (with lease) for %d branches...\n", len(branchesToForcePush))
 		for _, branchName := range branchesToForcePush {
 			fmt.Printf("  Force-pushing branch '%s'...\n", branchName)
+			gitCmd := exec.Command("git", "push", "--force-with-lease", cmd.Remote, branchName)
+			gitCmd.Dir = repoPath
 
-			// Create push options for force-with-lease (SAFE force push)
-			refSpec := gitconfig.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", branchName, branchName))
+			var stdout, stderr bytes.Buffer
+			gitCmd.Stdout = &stdout
+			gitCmd.Stderr = &stderr
 
-			// Use pre-fetch remote tracking ref hash for force-with-lease safety
-			preFetchRef, hasPreFetchRef := preFetchRemoteRefs[branchName]
-			if !hasPreFetchRef {
+			err = gitCmd.Run()
+
+			if err != nil {
 				failedForceCount++
-				errorColor.Printf("    Error: no pre-fetch remote tracking ref saved for force-with-lease '%s'\n", branchName)
-				errorCount++
-				continue
-			}
-
-			pushOptions := &git.PushOptions{
-				RemoteName: cmd.Remote,
-				RefSpecs:   []gitconfig.RefSpec{refSpec},
-				ForceWithLease: &git.ForceWithLease{
-					RefName: preFetchRef.refName,
-					Hash:    preFetchRef.hash, // Expected remote hash from before fetch - will fail if remote changed since then
-				},
-			}
-
-			err = r.Push(pushOptions)
-			if err != nil && err != git.NoErrAlreadyUpToDate {
-				failedForceCount++
-				errorColor.Printf("    Error force-pushing branch '%s': %s\n", branchName, err)
+				errMsg := strings.TrimSpace(stderr.String())
+				if errMsg == "" {
+					errMsg = strings.TrimSpace(stdout.String())
+				}
+				if errMsg == "" {
+					errMsg = err.Error()
+				}
+				errorColor.Printf("    Error force-pushing branch '%s': %s\n", branchName, errMsg)
 				errorCount++
 			} else {
 				successForceCount++
@@ -393,12 +346,13 @@ type SyncUndoCmd struct {
 }
 
 func (cmd *SyncUndoCmd) Run(ctx *kong.Context) error {
-	// Check if working directory is clean
-	r, err := openGitRepo()
+	// Check Git Status first
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusOutput, err := statusCmd.Output()
 	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
+		return fmt.Errorf("failed to check git status: %w", err)
 	}
-	if err := isWorkingDirectoryClean(r); err != nil {
+	if len(strings.TrimSpace(string(statusOutput))) > 0 {
 		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before undoing sync")
 	}
 

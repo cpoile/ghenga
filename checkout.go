@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
+	"strings"
 )
 
 // CheckoutBranch attempts to checkout the specified branch in the given repository.
@@ -20,89 +18,85 @@ func CheckoutBranch(repoPath, branchName string) error {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Open repository using go-git
-	r, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
+	// Change to repo directory for git operations
+	if err := os.Chdir(repoPath); err != nil {
+		return fmt.Errorf("failed to change to repo directory '%s': %w", repoPath, err)
+	}
+
+	// Check if working directory is clean before attempting checkout
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusOutput, err := statusCmd.Output()
 	if err != nil {
-		return fmt.Errorf("failed to open repository at '%s': %w", repoPath, err)
-	}
-
-	// Get worktree
-	wt, err := r.Worktree()
-	if err != nil {
-		return fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	// Check if working directory is clean
-	if err := checkWorkingDirectoryClean(wt); err != nil {
-		return err
-	}
-
-	// Check if branch exists in any worktree
-	worktreeDir, inWorktree, err := findBranchInWorktrees(wt, branchName)
-	if err != nil {
-		return fmt.Errorf("failed to check worktrees: %w", err)
-	}
-
-	if inWorktree {
-		// Branch is in a worktree, switch to it
-		return switchToWorktreeDir(worktreeDir, branchName)
-	}
-
-	// Try to checkout the branch normally
-	branchRef := plumbing.NewBranchReferenceName(branchName)
-	checkoutOpts := &git.CheckoutOptions{
-		Branch: branchRef,
-	}
-
-	if err := wt.Checkout(checkoutOpts); err != nil {
-		// Restore original directory before returning error
+		// Restore directory before returning error
 		if restoreErr := os.Chdir(originalDir); restoreErr != nil {
 			fmt.Printf("Warning: failed to restore original directory '%s': %v\n", originalDir, restoreErr)
 		}
-		return fmt.Errorf("failed to checkout branch '%s': %w", branchName, err)
+		return fmt.Errorf("failed to check git status: %w", err)
 	}
 
-	// Restore original directory on success
+	if len(strings.TrimSpace(string(statusOutput))) > 0 {
+		// Restore directory before returning error
+		if restoreErr := os.Chdir(originalDir); restoreErr != nil {
+			fmt.Printf("Warning: failed to restore original directory '%s': %v\n", originalDir, statusOutput)
+		}
+		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before switching branches")
+	}
+
+	// Try normal git checkout first
+	cmd := exec.Command("git", "checkout", branchName)
+	output, err := cmd.CombinedOutput()
+
+	if err == nil {
+		// Normal checkout succeeded - restore original directory
+		if restoreErr := os.Chdir(originalDir); restoreErr != nil {
+			fmt.Printf("Warning: failed to restore original directory '%s': %v\n", originalDir, restoreErr)
+		}
+		return nil
+	}
+
+	// Check if the error is due to the branch being checked out in a worktree
+	errorOutput := string(output)
+	if strings.Contains(errorOutput, "already checked out") ||
+		strings.Contains(errorOutput, "checked out at") {
+		// Branch is in a worktree, try to switch to it
+		// Note: switchToWorktree will change directories and we DON'T restore original
+		return switchToWorktree(branchName)
+	}
+
+	// Some other checkout error occurred - restore directory before returning error
 	if restoreErr := os.Chdir(originalDir); restoreErr != nil {
 		fmt.Printf("Warning: failed to restore original directory '%s': %v\n", originalDir, restoreErr)
 	}
-	return nil
+	return fmt.Errorf("failed to checkout branch '%s': %w\nOutput: %s", branchName, err, errorOutput)
 }
 
-// checkWorkingDirectoryClean verifies the working directory has no uncommitted changes
-func checkWorkingDirectoryClean(wt *git.Worktree) error {
-	status, err := wt.Status()
-	if err != nil {
-		return fmt.Errorf("failed to get working directory status: %w", err)
-	}
-
-	if !status.IsClean() {
-		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before switching branches")
-	}
-	return nil
-}
-
-// findBranchInWorktrees checks if a branch is checked out in any worktree
-func findBranchInWorktrees(wt *git.Worktree, branchName string) (string, bool, error) {
-	// Use git command to list worktrees since go-git doesn't have this functionality
+// switchToWorktree finds the worktree directory for the given branch and changes to it
+func switchToWorktree(branchName string) error {
+	// Get list of worktrees
 	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	cmd.Dir = wt.Filesystem.Root()
 	output, err := cmd.Output()
 	if err != nil {
-		// If worktree command fails, assume no worktrees exist
-		return "", false, nil
+		return fmt.Errorf("failed to list worktrees: %w", err)
 	}
 
 	// Parse worktree list to find the directory for our branch
-	worktreeDir, found := parseWorktreeDir(string(output), branchName)
-	return worktreeDir, found, nil
+	worktreeDir, err := parseWorktreeDir(string(output), branchName)
+	if err != nil {
+		return fmt.Errorf("failed to find worktree for branch '%s': %w", branchName, err)
+	}
+
+	// Change to the worktree directory
+	if err := os.Chdir(worktreeDir); err != nil {
+		return fmt.Errorf("failed to change to worktree directory '%s': %w", worktreeDir, err)
+	}
+
+	fmt.Printf("Switched to worktree directory: %s (branch: %s)\n", worktreeDir, branchName)
+	return nil
 }
 
 // parseWorktreeDir parses the output of 'git worktree list --porcelain' to find
 // the directory for the specified branch
-func parseWorktreeDir(output, targetBranch string) (string, bool) {
+func parseWorktreeDir(output, targetBranch string) (string, error) {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 
 	var currentWorktreeDir string
@@ -120,7 +114,7 @@ func parseWorktreeDir(output, targetBranch string) (string, bool) {
 			branch = strings.TrimPrefix(branch, "refs/heads/")
 
 			if branch == targetBranch && currentWorktreeDir != "" {
-				return currentWorktreeDir, true
+				return currentWorktreeDir, nil
 			}
 		} else if strings.HasPrefix(line, "HEAD ") || strings.HasPrefix(line, "bare ") || strings.HasPrefix(line, "detached ") {
 			// Known git worktree list fields - continue processing
@@ -130,16 +124,5 @@ func parseWorktreeDir(output, targetBranch string) (string, bool) {
 		}
 	}
 
-	return "", false
-}
-
-// switchToWorktreeDir changes to the specified worktree directory
-func switchToWorktreeDir(worktreeDir, branchName string) error {
-	// Change to the worktree directory
-	if err := os.Chdir(worktreeDir); err != nil {
-		return fmt.Errorf("failed to change to worktree directory '%s': %w", worktreeDir, err)
-	}
-
-	fmt.Printf("Switched to worktree directory: %s (branch: %s)\n", worktreeDir, branchName)
-	return nil
+	return "", fmt.Errorf("no worktree found for branch '%s'", targetBranch)
 }
