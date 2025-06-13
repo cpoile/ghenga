@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -41,7 +40,7 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 
 	// --- Get current branch --- (needed for checkout restore)
 	originalBranchName, err := getCurrentBranchName(r)
-	if err == nil {
+	if err != nil {
 		fmt.Printf("Warning: could not determine current branch: %v\n", err)
 	}
 	defer func() {
@@ -55,33 +54,21 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 		}
 	}()
 
-	fmt.Println("Checking tower branches for divergence...")
-	hasDiverged := false
-	for _, branch := range currentTower.Branches {
-		status, _, _, err := GetBranchPushStatus(r, l.Remote, branch.Name)
-		if err != nil {
-			// Handle cases like local branch deleted but still in config?
-			fmt.Printf("  Warning: Could not check status for branch '%s': %v\n", branch.Name, err)
-			continue // Or should this be an error?
-		}
-
-		if status == Diverged {
-			fmt.Printf("  Error: Branch '%s' has diverged from the remote '%s'.\n", branch.Name, l.Remote)
-			hasDiverged = true
-		} else if status == RemoteAhead {
-			// Also consider RemoteAhead as needing attention before landing
-			fmt.Printf("  Error: Remote branch '%s/%s' is ahead of local branch '%s'.\n", l.Remote, branch.Name, branch.Name)
-			hasDiverged = true // Treat as needing rebase/sync
-		}
+	if err := validateTowerBranchStatus(r, l.Remote, currentTower); err != nil {
+		return err
 	}
-	if hasDiverged {
-		return fmt.Errorf("one or more tower branches have diverged or are behind the remote. Please run 'ghenga rebase' or 'ghenga sync' (respectively) to bring them up to date")
-	}
-	fmt.Println("  All tower branches are up-to-date or ahead of remote.")
 
 	fmt.Println("Checking merge status of bottom branch...")
 	bottomBranch := currentTower.Branches[0]
 	fmt.Printf("  Bottom branch: %s\n", bottomBranch.Name)
+
+	// Update remote references before checking
+	fmt.Printf("  Fetching from remote '%s' to update references...\n", l.Remote)
+	fetchCmd := exec.Command("git", "fetch", l.Remote)
+	fetchCmd.Dir = repoPath
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to fetch from remote '%s': %w\nOutput: %s", l.Remote, err, string(output))
+	}
 
 	remoteBranchRefName := plumbing.NewRemoteReferenceName(l.Remote, bottomBranch.Name)
 	_, err = r.Reference(remoteBranchRefName, false) // false = don't resolve symbolic refs
@@ -119,64 +106,40 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 		return fmt.Errorf("failed to save config after removing branch '%s': %w", landedBranchName, err)
 	}
 
-	// --- Rebase new bottom branch onto base ---
-	if len(currentTower.Branches) > 0 {
-		newBottomBranch := currentTower.Branches[0]
-		fmt.Printf("  Rebasing new bottom branch '%s' onto base '%s'...\n", newBottomBranch.Name, currentTower.Base)
-
-		fmt.Printf("    Checking out '%s'...\n", newBottomBranch.Name)
-		checkoutCmd := exec.Command("git", "checkout", newBottomBranch.Name)
-		checkoutCmd.Dir = repoPath
-		if output, err := checkoutCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to checkout new bottom branch '%s': %w\nOutput: %s", newBottomBranch.Name, err, string(output))
-		}
-
-		// landedBranchName is the old base of newBottomBranch
-		fmt.Printf("    Running 'git rebase --onto %s %s %s'...\n", currentTower.Base, landedBranchName, newBottomBranch.Name)
-		rebaseCmd := exec.Command("git", "rebase", "--onto", currentTower.Base, landedBranchName, newBottomBranch.Name)
-		rebaseCmd.Dir = repoPath
-		var rebaseStdout, rebaseStderr bytes.Buffer
-		rebaseCmd.Stdout = &rebaseStdout
-		rebaseCmd.Stderr = &rebaseStderr
-
-		err = rebaseCmd.Run()
-		if err != nil {
-			errMsg := strings.TrimSpace(rebaseStderr.String())
-			if errMsg == "" {
-				errMsg = strings.TrimSpace(rebaseStdout.String())
-			}
-			fmt.Println("    Rebase failed. Attempting to abort...")
-			abortCmd := exec.Command("git", "rebase", "--abort")
-			abortCmd.Dir = repoPath
-			abortCmd.Run() // Run abort, ignore errors for now
-			return fmt.Errorf("failed to rebase '%s' onto '%s' (from base '%s'): %w\nOutput: %s", newBottomBranch.Name, currentTower.Base, landedBranchName, err, errMsg)
-		}
-		fmt.Printf("  Successfully rebased '%s' onto '%s'.\n", newBottomBranch.Name, currentTower.Base)
-
-		// Update originalBranchName in case we are now on the new bottom branch
-		originalBranchName = newBottomBranch.Name
-	} else {
+	// --- Rebase remaining branches ---
+	if len(currentTower.Branches) == 0 {
 		fmt.Println("  No remaining branches in the tower to rebase.")
-		// If no branches left after removing the bottom one, we are done.
 		fmt.Printf("\nBranch '%s' landed and removed from tower '%s'. Tower is now empty.\n", landedBranchName, currentTower.Name)
 		return nil
 	}
 
-	// --- Run rebase command on the rest of the tower ---
-	if len(currentTower.Branches) > 0 {
-		fmt.Println("\nRebasing remaining tower branches sequentially...")
-		err := rebaseTower(true, "", "")
-		if err != nil {
-			// Manually abort the cherry-pick or rebase process
-			abortCmd := exec.Command("git", "cherry-pick", "--abort")
-			abortCmd.Dir = repoPath
-			abortCmd.Run() // Ignore errors, as it might not be in a cherry-pick state
-			
-			// Always consider a rebase error as a fatal error in land, even if it's just a conflict pause
-			return fmt.Errorf("failed during sequential rebase of remaining tower branches: %w", err)
+	// Use rebase infrastructure for all remaining branches (handles single and multiple uniformly)
+	fmt.Printf("  Rebasing remaining branches in tower '%s'...\n", currentTower.Name)
+	
+	// Use RebaseModeReset with firstBranchExcludeBase to:
+	// - Rebase first remaining branch onto currentTower.Base, excluding commits from landedBranchName  
+	// - Rebase subsequent branches onto their predecessors
+	// This gives us state tracking, undo support, and conflict handling
+	err = rebaseTowerWithMode(RebaseModeReset, true, "", "", currentTower.Base, landedBranchName)
+	if err == errRebasePaused {
+		// Rebase paused due to conflicts - delegate to rebase infrastructure for resolution
+		fmt.Printf("\nLand operation paused due to rebase conflicts.\n")
+		fmt.Printf("Resolve conflicts and run 'ghenga rebase continue' to complete the landing,\n")
+		fmt.Printf("or run 'ghenga rebase cancel' to abort and return to the previous state.\n")
+		
+		// Reload config to get updated rebase state for error message
+		_, _, reloadedTower, _, reloadErr := loadRepoInfoAndCurrentTower()
+		if reloadErr == nil && reloadedTower.RebaseState != nil {
+			targetBranch := reloadedTower.RebaseState.TargetBranch
+			baseBranch := reloadedTower.RebaseState.BaseBranch
+			return fmt.Errorf("failed during sequential rebase of remaining tower branches: failed to rebase '%s' onto '%s'", targetBranch, baseBranch)
 		}
-		fmt.Println("Remaining tower branches rebased successfully.")
+		return fmt.Errorf("failed during sequential rebase of remaining tower branches")
 	}
+	if err != nil {
+		return fmt.Errorf("failed to rebase remaining tower branches: %w", err)
+	}
+	fmt.Println("  Successfully rebased all remaining branches.")
 
 	fmt.Printf("\nBranch '%s' landed and removed from tower '%s'. Remaining branches rebased.\n", landedBranchName, currentTower.Name)
 	return nil

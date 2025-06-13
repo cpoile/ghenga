@@ -726,16 +726,18 @@ func TestLandRebaseOntoConflict(t *testing.T) {
 	require.Contains(t, err.Error(), branch2Name, "Error message should mention conflicting branch")
 	require.Contains(t, err.Error(), baseBranchName, "Error message should mention base branch")
 
-	// Verify rebase was aborted (check git status)
+	// Verify rebase is paused (conflicts preserved for user resolution)
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusOutput, statusErr := statusCmd.Output()
 	require.NoError(t, statusErr, "Failed to run git status after conflict")
-	require.Empty(t, strings.TrimSpace(string(statusOutput)), "Worktree should be clean after aborted rebase")
+	require.NotEmpty(t, strings.TrimSpace(string(statusOutput)), "Worktree should have conflicts preserved for resolution")
 
-	// Verify original branch was restored (should be baseBranchName)
-	currentBranch, err := getCurrentBranchName(localRepo)
-	require.NoError(t, err)
-	require.Equal(t, baseBranchName, currentBranch, "Should have checked out original branch (main) after failed rebase")
+	// Verify rebase state is saved for continue/cancel workflow
+	_, _, tower, _, configErr := loadRepoInfoAndCurrentTower()
+	require.NoError(t, configErr)
+	require.NotNil(t, tower.RebaseState, "RebaseState should be saved for user resolution")
+	require.True(t, tower.RebaseState.IsInProgress, "RebaseState should be in progress")
+	require.Equal(t, branch2Name, tower.RebaseState.TargetBranch, "Should have correct target branch in rebase state")
 }
 
 func TestLandSequentialRebaseConflict(t *testing.T) {
@@ -861,22 +863,23 @@ func TestLandSequentialRebaseConflict(t *testing.T) {
 	require.Contains(t, err.Error(), "failed during sequential rebase of remaining tower branches", "Error message should mention sequential rebase failure")
 
 	// --- Verify State ---
-	// Verify rebase was aborted (check git status)
+	// Verify rebase is paused (conflicts preserved for user resolution)
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusCmd.Dir = localRepoPath // Make sure it runs in the repo dir
 	statusOutput, statusErr := statusCmd.Output()
 	require.NoError(t, statusErr, "Failed to run git status after conflict")
-	require.Empty(t, strings.TrimSpace(string(statusOutput)), "Worktree should be clean after aborted rebase")
+	require.NotEmpty(t, strings.TrimSpace(string(statusOutput)), "Worktree should have conflicts preserved for resolution")
 
-	// Verify a branch was restored and the repo is in a clean state
-	currentBranch, err := getCurrentBranchName(localRepo)
-	require.NoError(t, err)
-	// In this case, we expect branch2Name as that's what was checked out during the land sequence
-	require.Equal(t, branch2Name, currentBranch, "Should have restored to branch2 after failed sequential rebase")
+	// Verify rebase state is saved for continue/cancel workflow
+	_, _, tower, _, configErr := loadRepoInfoAndCurrentTower()
+	require.NoError(t, configErr)
+	require.NotNil(t, tower.RebaseState, "RebaseState should be saved for user resolution")
+	require.True(t, tower.RebaseState.IsInProgress, "RebaseState should be in progress")
+	require.Equal(t, branch3Name, tower.RebaseState.TargetBranch, "Should have correct target branch in rebase state")
 
-	// Verify that branch2 has a valid reference after the rebase
+	// Verify that branches still exist after the paused rebase
 	branch2RefPostLand, err := localRepo.Reference(plumbing.NewBranchReferenceName(branch2Name), true)
-	require.NoError(t, err, "Branch2 should still exist after the rebase")
+	require.NoError(t, err, "Branch2 should still exist after the paused rebase")
 	branch2CommitPostLand, err := localRepo.CommitObject(branch2RefPostLand.Hash())
 	require.NoError(t, err)
 	require.Len(t, branch2CommitPostLand.ParentHashes, 1, "Branch2 should have exactly one parent after rebase")
@@ -1083,6 +1086,17 @@ func TestLandSequenceWithSharedFile(t *testing.T) {
 	assertBranchRebasedOnto(t, localRepo, branchBName, branchAHeadHash) // B should be based on A's commit (which is now main)
 	assertBranchContainsContent(t, localRepo, branchCName, sharedFileName, "Version C")
 	assertBranchParent(t, localRepo, branchCName, branchBName) // C should still be based on B (after B was rebased)
+
+	// --- Sync remaining branches after first land ---
+	// After landing A, remaining branches B and C have been rebased and need to be synced to remote
+	restoreStdin := mockInput("y") // Confirm sync operation
+	defer restoreStdin()
+	
+	syncDoCmd := &SyncDoCmd{Remote: remoteName}
+	syncParser := kong.Must(&CLI{})
+	syncKongCtx, _ := syncParser.Parse([]string{"sync"})
+	err = syncDoCmd.Run(syncKongCtx)
+	require.NoError(t, err, "Sync after landing A should succeed")
 
 	// --- Land Branch B ---
 	t.Log("--- Landing Branch B ---")

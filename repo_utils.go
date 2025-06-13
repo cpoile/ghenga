@@ -375,3 +375,36 @@ func hasConflicts(repoPath string) (bool, error) {
 	}
 	return false, nil
 }
+
+// validateTowerBranchStatus checks all branches in a tower for divergence from remote
+// and returns an error if any branch is diverged or behind the remote.
+// This is used by commands that require the tower to be in a "clean" state.
+func validateTowerBranchStatus(r *git.Repository, remoteName string, tower *Tower) error {
+	fmt.Println("Checking tower branches for divergence...")
+	hasDiverged := false
+	
+	for _, branch := range tower.Branches {
+		status, _, _, err := GetBranchPushStatus(r, remoteName, branch.Name)
+		if err != nil {
+			// Handle cases like local branch deleted but still in config
+			fmt.Printf("  Warning: Could not check status for branch '%s': %v\n", branch.Name, err)
+			continue
+		}
+
+		if status == Diverged {
+			fmt.Printf("  Error: Branch '%s' has diverged from the remote '%s'.\n", branch.Name, remoteName)
+			hasDiverged = true
+		} else if status == RemoteAhead {
+			// Also consider RemoteAhead as needing attention before operations
+			fmt.Printf("  Error: Remote branch '%s/%s' is ahead of local branch '%s'.\n", remoteName, branch.Name, branch.Name)
+			hasDiverged = true // Treat as needing rebase/sync
+		}
+	}
+	
+	if hasDiverged {
+		return fmt.Errorf("one or more tower branches have diverged or are behind the remote. Please run 'ghenga rebase' or 'ghenga sync' (respectively) to bring them up to date")
+	}
+	
+	fmt.Println("  All tower branches are up-to-date or ahead of remote.")
+	return nil
+}
