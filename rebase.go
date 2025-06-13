@@ -24,6 +24,7 @@ type BranchInfo struct {
 type RebaseCmd struct {
 	Do       RebaseDoCmd       `cmd:"" default:"1" hidden:"" help:"Rebase all branches in the current tower that have diverged from their base"`
 	From     RebaseFromCmd     `cmd:"from" help:"Rebase [branch] from [commit] onto its base, then continue rebasing all latter branches in the current tower."`
+	Onto     RebaseOntoCmd     `cmd:"onto" help:"Rebase the entire tower onto a new base branch or commit"`
 	Undo     RebaseUndoCmd     `cmd:"undo" help:"Undo the last rebase operation for the current tower"`
 	Continue RebaseContinueCmd `cmd:"continue" help:"Continue a paused rebase operation after resolving conflicts"`
 	Cancel   RebaseCancelCmd   `cmd:"cancel" help:"Cancel an in-progress rebase operation"`
@@ -49,6 +50,30 @@ func (r *RebaseFromCmd) Run(_ *kong.Context) error {
 	return rebaseTower(false, r.Branch, r.FromCommit)
 }
 
+type RebaseOntoCmd struct {
+	NewBase string `arg:"" help:"Branch or commit to rebase the tower onto" predictor:"predictBranches"`
+}
+
+func (r *RebaseOntoCmd) Run(_ *kong.Context) error {
+	// Basic validation only
+	if r.NewBase == "" {
+		return fmt.Errorf("new base argument is required")
+	}
+
+	// Delegate everything else to rebaseTowerWithMode
+	err := rebaseTowerWithMode(RebaseModeReset, false, "", "", r.NewBase, "")
+	if err == errRebasePaused {
+		fmt.Println("Rebase onto paused due to conflicts. Use 'ghenga rebase continue' to resume after resolving.")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to rebase tower onto new base: %w", err)
+	}
+
+	fmt.Println("Rebase onto completed successfully!")
+	return nil
+}
+
 // RebaseMode defines the type of rebase operation
 type RebaseMode int
 
@@ -62,12 +87,13 @@ const (
 // and performs the sequential rebase, pausing if conflicts occur.
 // If partialRebaseBranchName and partialRebaseCommit are provided, it starts rebasing from that specific commit on that branch.
 func rebaseTower(skipConfirmation bool, partialRebaseBranchName string, partialRebaseCommit string) error {
-	return rebaseTowerWithMode(RebaseModeNormal, skipConfirmation, partialRebaseBranchName, partialRebaseCommit, "")
+	return rebaseTowerWithMode(RebaseModeNormal, skipConfirmation, partialRebaseBranchName, partialRebaseCommit, "", "")
 }
 
 // rebaseTowerWithMode performs the core logic of rebasing a tower's branches with a specified mode.
 // resetNewBase is only used when mode is RebaseModeReset
-func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBranchName string, partialRebaseCommit string, resetNewBase string) error {
+// firstBranchExcludeBase, when set, is used instead of resetNewBase for calculating unique commits of the first branch (for landing)
+func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBranchName string, partialRebaseCommit string, resetNewBase string, firstBranchExcludeBase string) error {
 	// Check if a rebase is already in progress
 	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
@@ -99,7 +125,7 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 	if currentTower.Base == "" {
 		return fmt.Errorf("tower '%s' has no base branch set. Use 'ghenga base <branch-name>' to set it first", currentTower.Name)
 	}
-	if len(currentTower.Branches) < 2 {
+	if len(currentTower.Branches) < 2 && firstBranchExcludeBase == "" {
 		fmt.Printf("Tower '%s' has less than two branches, nothing to rebase relative to each other.\n", currentTower.Name)
 		return nil
 	}
@@ -255,10 +281,17 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 			// For reset mode, get unique commits relative to the target base
 			var baseHead plumbing.Hash
 			if i == 0 {
-				// First branch: get commits relative to resetNewBase
-				newBaseRef, err := gitRepo.ResolveRevision(plumbing.Revision(resetNewBase))
+				// First branch: get commits relative to resetNewBase or firstBranchExcludeBase
+				baseToUse := resetNewBase
+				if firstBranchExcludeBase != "" {
+					baseToUse = firstBranchExcludeBase
+				}
+				newBaseRef, err := gitRepo.ResolveRevision(plumbing.Revision(baseToUse))
 				if err != nil {
-					return fmt.Errorf("failed to resolve reset base '%s': %w", resetNewBase, err)
+					if firstBranchExcludeBase != "" {
+						return fmt.Errorf("failed to resolve exclude base '%s': %w", baseToUse, err)
+					}
+					return fmt.Errorf("failed to resolve rebase onto base '%s': %w", baseToUse, err)
 				}
 				baseHead = *newBaseRef
 			} else {
@@ -856,30 +889,6 @@ func finalizeSuccessfulBranchRebase(repoPath, targetBranch, tempBranch, original
 		// Don't fail the whole operation for this.
 	}
 	return nil
-}
-
-// Helper function: hasConflicts checks git status for unmerged paths
-func hasConflicts(repoPath string) (bool, error) {
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = repoPath
-	output, err := statusCmd.Output()
-	if err != nil {
-		// Check if the error is because we are mid-rebase (often non-zero exit code)
-		// but still want to parse the output for 'U' markers.
-		// If no output AND error, then it's likely a real error.
-		if len(output) == 0 {
-			return false, fmt.Errorf("failed to get git status: %w", err)
-		}
-		// Otherwise, proceed to parse the output even if exit code was non-zero
-	}
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		// Look for standard conflict markers (Unmerged) or Added/Deleted by both
-		if len(line) >= 2 && (line[0] == 'U' || (line[0] == 'A' && line[1] == 'A') || (line[0] == 'D' && line[1] == 'D') || (line[0] == 'R' && line[1] == 'U') || (line[0] == 'U' && line[1] == 'R')) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 type RebaseUndoCmd struct {

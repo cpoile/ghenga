@@ -10,6 +10,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
+	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
@@ -43,36 +44,40 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 		return fmt.Errorf("failed to load repository info: %w", err)
 	}
 
-	fmt.Printf("Checking branches in tower '%s' for remote '%s'...\n", currentTower.Name, cmd.Remote)
-
-	// Save remote tracking refs before fetch (for force-with-lease safety)
-	type remoteRefState struct {
-		refName plumbing.ReferenceName
-		hash    plumbing.Hash
+	r, err := openGitRepo()
+	if err != nil {
+		return fmt.Errorf("failed to open git repository in %s: %w", repoPath, err)
 	}
-	var preFetchRemoteRefs = make(map[string]remoteRefState)
 
-	for _, branch := range currentTower.Branches {
-		remoteTrackingRef := plumbing.NewRemoteReferenceName(cmd.Remote, branch.Name)
-		if remoteRef, err := r.Reference(remoteTrackingRef, true); err == nil {
-			// For force-with-lease, we need the actual remote ref name, not the tracking ref
-			actualRemoteRef := plumbing.NewBranchReferenceName(branch.Name)
-			preFetchRemoteRefs[branch.Name] = remoteRefState{
-				refName: actualRemoteRef, // Use remote branch ref, not tracking ref
-				hash:    remoteRef.Hash(),
+	// Check if we need to fetch and prompt user
+	needsFetch, err := checkIfFetchNeeded(r, cmd.Remote, currentTower.Branches)
+	if err != nil {
+		fmt.Printf("Warning: Could not determine if fetch is needed: %v\n", err)
+		fmt.Println("Proceeding with existing remote tracking branch information.")
+	} else if needsFetch {
+		fmt.Printf("Remote tracking branches for '%s' appear stale.\n", cmd.Remote)
+		fmt.Print("Fetch latest remote state for accurate status detection? [Y/n]: ")
+		var response string
+		fmt.Scanln(&response)
+
+		if strings.ToLower(response) != "n" && strings.ToLower(response) != "no" {
+			fmt.Printf("Fetching latest state from remote '%s'...\n", cmd.Remote)
+			fetchCmd := exec.Command("git", "fetch", cmd.Remote)
+			fetchCmd.Dir = repoPath
+			if output, err := fetchCmd.CombinedOutput(); err != nil {
+				// Don't fail hard on fetch errors - remote might not exist or be unreachable
+				// But warn the user that status detection may be inaccurate
+				fmt.Printf("Warning: Failed to fetch from remote '%s': %v\n", cmd.Remote, err)
+				fmt.Printf("Git output: %s\n", string(output))
+				fmt.Println("Status detection may be based on stale remote information.")
 			}
+		} else {
+			fmt.Println("Proceeding with existing remote tracking branch information.")
+			fmt.Println("Note: Status detection may be based on stale remote information.")
 		}
 	}
 
-	// Fetch latest remote state to ensure accurate status detection
-	fmt.Printf("Fetching latest remote state from '%s'...\n", cmd.Remote)
-	fetchOptions := &git.FetchOptions{
-		RemoteName: cmd.Remote,
-	}
-	err = r.Fetch(fetchOptions)
-	if err != nil && err != git.NoErrAlreadyUpToDate {
-		return fmt.Errorf("failed to fetch from remote '%s': %w", cmd.Remote, err)
-	}
+	fmt.Printf("Checking branches in tower '%s' for remote '%s'...\n", currentTower.Name, cmd.Remote)
 
 	var branchesToForcePush []string
 	var branchesToNormalPush []string
@@ -281,6 +286,8 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 		fmt.Printf("\nExecuting force-pushes (with lease) for %d branches...\n", len(branchesToForcePush))
 		for _, branchName := range branchesToForcePush {
 			fmt.Printf("  Force-pushing branch '%s'...\n", branchName)
+
+			// Use simple force-with-lease (relies on remote tracking branches)
 			gitCmd := exec.Command("git", "push", "--force-with-lease", cmd.Remote, branchName)
 			gitCmd.Dir = repoPath
 
@@ -462,4 +469,30 @@ func (cmd *SyncUndoCmd) Run(ctx *kong.Context) error {
 
 	fmt.Println("\nSuccessfully undid the last sync operation!")
 	return nil
+}
+
+// checkIfFetchNeeded determines if remote tracking branches are stale and need updating
+func checkIfFetchNeeded(r *git.Repository, remoteName string, branches []Branch) (bool, error) {
+	// Simple heuristic: check if any remote tracking branches exist but are old
+	// This is a reasonable approximation - in practice, if remote tracking branches
+	// exist, they should be relatively recent if the user has been fetching
+
+	hasRemoteTrackingBranches := false
+	for _, branch := range branches {
+		remoteRefName := plumbing.NewRemoteReferenceName(remoteName, branch.Name)
+		if _, err := r.Reference(remoteRefName, true); err == nil {
+			hasRemoteTrackingBranches = true
+			break
+		}
+	}
+
+	// If no remote tracking branches exist, we definitely need to fetch
+	if !hasRemoteTrackingBranches {
+		return true, nil
+	}
+
+	// If remote tracking branches exist, we'll assume they're reasonably current
+	// This avoids the complexity of checking timestamps or making actual network calls
+	// Users can always choose to fetch anyway when prompted
+	return false, nil
 }
