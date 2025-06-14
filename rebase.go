@@ -430,13 +430,13 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 			db.Name, db.BaseBranchName, commitCount, commitStr)
 	}
 
-	warningColor.Println("\nWARNING: Rebasing will change commit hashes and you will need to force-push to remote branches if they exist.")
-	warningColor.Println("Make sure you understand the implications of rebasing published branches.")
-	fmt.Println("You may undo the rebase with 'ghenga rebase undo'.")
-	fmt.Println("You may continue a paused rebase with 'ghenga rebase continue'.")
-
 	// Skip confirmation if skipConfirmation is true
 	if !skipConfirmation {
+		warningColor.Println("\nWARNING: Rebasing will change commit hashes and you will need to force-push to remote branches if they exist.")
+		warningColor.Println("Make sure you understand the implications of rebasing published branches.")
+		fmt.Println("You may undo the rebase with 'ghenga rebase undo'.")
+		fmt.Println("You may continue a paused rebase with 'ghenga rebase continue'.")
+
 		fmt.Print("\nProceed with rebasing? [y/N]: ")
 
 		var response string
