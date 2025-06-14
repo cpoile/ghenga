@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -266,9 +267,7 @@ func detectDefaultBranch(r *git.Repository) string {
 // updateLocalBranchFromRemote fetches remote and updates local branch
 func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName, localBranch, currentBranchToPreserve string) error {
 	fmt.Printf("    Fetching remote '%s'...\n", remoteName)
-	fetchCmd := exec.Command("git", "fetch", remoteName)
-	fetchCmd.Dir = repoPath
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
+	if output, err := runGitCommandWithRetry(repoPath, "fetch", remoteName); err != nil {
 		return fmt.Errorf("git fetch failed: %w\nOutput: %s", err, string(output))
 	}
 
@@ -297,9 +296,7 @@ func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName,
 
 	// Reset the local branch to the remote's state
 	fmt.Printf("    Resetting '%s' to '%s' (%s)...\n", localBranch, remoteRefName, remoteRef.Hash().String()[:7])
-	resetCmd := exec.Command("git", "reset", "--hard", remoteRefName.String())
-	resetCmd.Dir = repoPath
-	if output, err := resetCmd.CombinedOutput(); err != nil {
+	if output, err := runGitCommandWithRetry(repoPath, "reset", "--hard", remoteRefName.String()); err != nil {
 		// Attempt to checkout original branch even if reset fails
 		return fmt.Errorf("git reset --hard failed: %w\nOutput: %s", err, string(output))
 	}
@@ -352,6 +349,51 @@ func isWorkingDirectoryClean(r *git.Repository) error {
 	return nil
 }
 
+// runGitCommandWithRetry executes a git command with retry logic for lock file errors
+func runGitCommandWithRetry(repoPath string, args ...string) ([]byte, error) {
+	maxRetries := 10
+	baseSleepMs := 100
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoPath
+		output, err := cmd.CombinedOutput()
+
+		if err == nil {
+			return output, nil // Success
+		}
+
+		// Check if this is a lock file error and we haven't exhausted retries
+		if attempt < maxRetries && isGitLockFileError(string(output)) {
+			sleepMs := baseSleepMs * (1 << attempt) // Exponential backoff
+			if sleepMs > 2000 {
+				sleepMs = 2000 // Cap at 2 seconds
+			}
+
+			fmt.Printf("    Git lock file detected, retrying in %dms (attempt %d/%d)...\n",
+				sleepMs, attempt+1, maxRetries+1)
+			time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+			continue
+		}
+
+		// Either not a lock file error, or we've exhausted retries
+		if isGitLockFileError(string(output)) {
+			return output, fmt.Errorf("git lock file persisted after %d retries: %w", maxRetries+1, err)
+		}
+
+		return output, err // Return original error
+	}
+
+	// Should never reach here, but just in case
+	return nil, fmt.Errorf("unexpected error in git command retry logic")
+}
+
+// isGitLockFileError checks if the error output indicates a git lock file issue
+func isGitLockFileError(output string) bool {
+	return strings.Contains(output, "index.lock") &&
+		(strings.Contains(output, "File exists") || strings.Contains(output, "Another git process"))
+}
+
 // Helper function: hasConflicts checks git status for unmerged paths
 func hasConflicts(repoPath string) (bool, error) {
 	statusCmd := exec.Command("git", "status", "--porcelain")
@@ -382,7 +424,7 @@ func hasConflicts(repoPath string) (bool, error) {
 func validateTowerBranchStatus(r *git.Repository, remoteName string, tower *Tower) error {
 	fmt.Println("Checking tower branches for divergence...")
 	hasDiverged := false
-	
+
 	for _, branch := range tower.Branches {
 		status, _, _, err := GetBranchPushStatus(r, remoteName, branch.Name)
 		if err != nil {
@@ -400,11 +442,11 @@ func validateTowerBranchStatus(r *git.Repository, remoteName string, tower *Towe
 			hasDiverged = true // Treat as needing rebase/sync
 		}
 	}
-	
+
 	if hasDiverged {
 		return fmt.Errorf("one or more tower branches have diverged or are behind the remote. Please run 'ghenga rebase' or 'ghenga sync' (respectively) to bring them up to date")
 	}
-	
+
 	fmt.Println("  All tower branches are up-to-date or ahead of remote.")
 	return nil
 }

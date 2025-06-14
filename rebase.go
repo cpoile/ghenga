@@ -823,49 +823,9 @@ func prepareForBranchRebase(repoPath, baseBranchName, targetBranchName, original
 	return tempBranch, nil
 }
 
-// isGitLockFileError checks if the error output indicates a git lock file issue
-func isGitLockFileError(output string) bool {
-	return strings.Contains(output, "index.lock") &&
-		(strings.Contains(output, "File exists") || strings.Contains(output, "Another git process"))
-}
-
 // cherryPickWithRetry attempts to cherry-pick a commit with retry logic for lock file errors
 func cherryPickWithRetry(repoPath, commit string) ([]byte, error) {
-	maxRetries := 10
-	baseSleepMs := 100
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		cherryPickCmd := exec.Command("git", "cherry-pick", commit)
-		cherryPickCmd.Dir = repoPath
-		output, err := cherryPickCmd.CombinedOutput()
-
-		if err == nil {
-			return output, nil // Success
-		}
-
-		// Check if this is a lock file error and we haven't exhausted retries
-		if attempt < maxRetries && isGitLockFileError(string(output)) {
-			sleepMs := baseSleepMs * (1 << attempt) // Exponential backoff
-			if sleepMs > 2000 {
-				sleepMs = 2000 // Cap at 2 seconds
-			}
-
-			fmt.Printf("    Git lock file detected, retrying in %dms (attempt %d/%d)...\n",
-				sleepMs, attempt+1, maxRetries+1)
-			time.Sleep(time.Duration(sleepMs) * time.Millisecond)
-			continue
-		}
-
-		// Either not a lock file error, or we've exhausted retries
-		if isGitLockFileError(string(output)) {
-			return output, fmt.Errorf("git lock file persisted after %d retries: %w", maxRetries+1, err)
-		}
-
-		return output, err // Return original error
-	}
-
-	// Should never reach here, but just in case
-	return nil, fmt.Errorf("unexpected error in cherry-pick retry logic")
+	return runGitCommandWithRetry(repoPath, "cherry-pick", commit)
 }
 
 // applyCommitsAndHandlePause performs the cherry-pick loop for a given branch.

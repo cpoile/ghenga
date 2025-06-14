@@ -42,9 +42,8 @@ func CheckoutBranch(repoPath, branchName string) error {
 		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before switching branches")
 	}
 
-	// Try normal git checkout first
-	cmd := exec.Command("git", "checkout", branchName)
-	output, err := cmd.CombinedOutput()
+	// Try normal git checkout first (with retry logic for lock file errors)
+	output, err := runGitCommandWithRetry(".", "checkout", branchName)
 
 	if err == nil {
 		// Normal checkout succeeded - restore original directory

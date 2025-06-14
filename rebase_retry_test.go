@@ -22,7 +22,6 @@ func TestCherryPickWithRetryLockFile(t *testing.T) {
 	require.NoError(t, err)
 	testCommitHash := testBranchRef.Hash().String()
 
-
 	// Create fake git directory and script
 	fakeGitDir := filepath.Join(repoPath, "fake-git-bin")
 	err = os.MkdirAll(fakeGitDir, 0755)
@@ -138,15 +137,15 @@ fi
 	err = os.Remove(counterFilePath)
 	require.NoError(t, err)
 
-	// Now test the actual cherryPickWithRetry function
-	t.Log("Testing cherryPickWithRetry function...")
+	// Now test the actual runGitCommandWithRetry function (which cherryPickWithRetry uses)
+	t.Log("Testing runGitCommandWithRetry function...")
 
 	// Try to cherry-pick the test commit using our retry logic
 	// This should succeed after a few retries as our fake git will return lock errors for first 3 attempts
-	output, err := cherryPickWithRetry(repoPath, testCommitHash)
+	output, err := runGitCommandWithRetry(repoPath, "cherry-pick", testCommitHash)
 
 	// The function should eventually succeed
-	require.NoError(t, err, "cherryPickWithRetry should succeed after retries")
+	require.NoError(t, err, "runGitCommandWithRetry should succeed after retries")
 	require.NotEmpty(t, output, "Should have some output from successful cherry-pick")
 
 	// Verify the retry attempts were made
@@ -177,5 +176,6 @@ fi
 	require.Contains(t, finalLogContent, "simulating success", "Should eventually simulate success")
 
 	t.Log("✅ Git lock file retry logic is working correctly!")
-	t.Log("✅ cherryPickWithRetry successfully handled lock file errors with exponential backoff")
+	t.Log("✅ runGitCommandWithRetry successfully handled lock file errors with exponential backoff")
+	t.Log("✅ This generic function can now be used by any git command that might hit lock file errors")
 }
