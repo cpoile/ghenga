@@ -56,7 +56,8 @@ func CheckoutBranch(repoPath, branchName string) error {
 	// Check if the error is due to the branch being checked out in a worktree
 	errorOutput := string(output)
 	if strings.Contains(errorOutput, "already checked out") ||
-		strings.Contains(errorOutput, "checked out at") {
+		strings.Contains(errorOutput, "checked out at") ||
+		strings.Contains(errorOutput, "already used by worktree") {
 		// Branch is in a worktree, try to switch to it
 		// Note: switchToWorktree will change directories and we DON'T restore original
 		return switchToWorktree(branchName)

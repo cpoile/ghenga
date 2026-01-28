@@ -173,7 +173,7 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 		for i := range currentTower.Branches {
 			if currentTower.Branches[i].Name == branchName {
 				branchRefName := plumbing.NewBranchReferenceName(branchName)
-				branchRef, err := r.Reference(branchRefName, true)
+				branchRef, err := getReference(r, branchRefName)
 				if err != nil {
 					fmt.Printf("Warning: Could not get current ref for branch '%s' to save undo state: %v\n", branchName, err)
 					continue
@@ -208,7 +208,7 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 	failedPullCount := 0
 
 	// Get original branch to restore later
-	headRef, err := r.Head()
+	headRef, err := getHead(r)
 	if err != nil {
 		fmt.Printf("Warning: could not determine current branch: %v\n", err)
 	}
@@ -414,7 +414,7 @@ func (cmd *SyncUndoCmd) Run(ctx *kong.Context) error {
 	}
 
 	// Get the current branch to restore it at the end
-	head, err := gitRepo.Head()
+	head, err := getHead(gitRepo)
 	if err != nil {
 		return fmt.Errorf("failed to get current branch: %w", err)
 	}
@@ -431,7 +431,7 @@ func (cmd *SyncUndoCmd) Run(ctx *kong.Context) error {
 		fmt.Printf("Attempting to restore branch '%s' to %s...\n", branch.Name, branch.PreSyncReflogID[:7])
 
 		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
-		_, err := gitRepo.Reference(branchRefName, true)
+		_, err := getReference(gitRepo, branchRefName)
 		branchExistsLocally := err == nil
 
 		var restoreCmd *exec.Cmd
@@ -480,7 +480,7 @@ func checkIfFetchNeeded(r *git.Repository, remoteName string, branches []Branch)
 	hasRemoteTrackingBranches := false
 	for _, branch := range branches {
 		remoteRefName := plumbing.NewRemoteReferenceName(remoteName, branch.Name)
-		if _, err := r.Reference(remoteRefName, true); err == nil {
+		if _, err := getReference(r, remoteRefName); err == nil {
 			hasRemoteTrackingBranches = true
 			break
 		}

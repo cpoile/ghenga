@@ -25,7 +25,30 @@ func getCurrentRepository() (string, error) {
 		return "", fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	return wt.Filesystem.Root(), nil
+	// Resolve worktree path to main repo path
+	return resolveMainRepoPath(wt.Filesystem.Root())
+}
+
+// resolveMainRepoPath resolves a worktree path to the main repository path.
+// If already in the main repo, returns the path unchanged.
+func resolveMainRepoPath(repoRoot string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	cmd.Dir = repoRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git common dir: %w", err)
+	}
+
+	gitCommonDir := strings.TrimSpace(string(output))
+
+	// If .git is relative, we're in the main repo
+	if gitCommonDir == ".git" || !filepath.IsAbs(gitCommonDir) {
+		return repoRoot, nil
+	}
+
+	// gitCommonDir is absolute (e.g., /path/to/main-repo/.git)
+	// The main repo is the parent of the .git directory
+	return filepath.Dir(gitCommonDir), nil
 }
 
 // findTowerByName finds a tower by name in the given repository configuration
@@ -182,79 +205,164 @@ func openGitRepo() (*git.Repository, error) {
 	return r, nil
 }
 
-// findMergeBase finds the merge base (common ancestor) between two commits
-func findMergeBase(r *git.Repository, commit1, commit2 plumbing.Hash) (plumbing.Hash, error) {
+// getHead returns the HEAD reference, using git CLI as fallback for worktree support.
+// go-git's PlainOpenWithOptions doesn't properly handle git worktrees - when opening
+// a repo from a worktree directory, r.Head() fails because go-git doesn't correctly
+// follow the worktree's HEAD reference.
+func getHead(r *git.Repository) (*plumbing.Reference, error) {
+	// Try go-git first
+	headRef, err := r.Head()
+	if err == nil {
+		return headRef, nil
+	}
+
+	// Fallback to git CLI for worktree support
+	cmd := exec.Command("git", "symbolic-ref", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+
+	refName := plumbing.ReferenceName(strings.TrimSpace(string(output)))
+
+	// Get the hash for this reference
+	hashCmd := exec.Command("git", "rev-parse", "HEAD")
+	hashOutput, err := hashCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HEAD hash: %w", err)
+	}
+
+	hash := plumbing.NewHash(strings.TrimSpace(string(hashOutput)))
+	return plumbing.NewHashReference(refName, hash), nil
+}
+
+// getReference returns a reference by name using git CLI for worktree support.
+// go-git's r.Reference() doesn't properly handle git worktrees.
+func getReference(_ *git.Repository, refName plumbing.ReferenceName) (*plumbing.Reference, error) {
+	cmd := exec.Command("git", "rev-parse", refName.String())
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, plumbing.ErrReferenceNotFound
+	}
+
+	hash := plumbing.NewHash(strings.TrimSpace(string(output)))
+	return plumbing.NewHashReference(refName, hash), nil
+}
+
+// resolveRevision resolves a revision to a hash using git CLI for worktree support.
+// go-git's r.ResolveRevision() doesn't properly handle git worktrees.
+func resolveRevision(_ *git.Repository, rev plumbing.Revision) (*plumbing.Hash, error) {
+	cmd := exec.Command("git", "rev-parse", string(rev))
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("reference not found: %s", rev)
+	}
+
+	h := plumbing.NewHash(strings.TrimSpace(string(output)))
+	return &h, nil
+}
+
+// findMergeBase finds the merge base (common ancestor) between two commits using git CLI.
+// Uses CLI instead of go-git because go-git can't access objects from worktrees.
+func findMergeBase(_ *git.Repository, commit1, commit2 plumbing.Hash) (plumbing.Hash, error) {
 	// If commits are the same, return immediately
 	if commit1 == commit2 {
 		return commit1, nil
 	}
 
-	// Get commit objects
-	c1, err := r.CommitObject(commit1)
+	cmd := exec.Command("git", "merge-base", commit1.String(), commit2.String())
+	output, err := cmd.Output()
 	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-
-	c2, err := r.CommitObject(commit2)
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-
-	// Find merge base using go-git's MergeBase function
-	mergeBase, err := c1.MergeBase(c2)
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-
-	if len(mergeBase) == 0 {
 		return plumbing.ZeroHash, fmt.Errorf("no common ancestor found")
 	}
 
-	return mergeBase[0].Hash, nil
+	return plumbing.NewHash(strings.TrimSpace(string(output))), nil
 }
 
-// detectDefaultBranch attempts to determine the default branch name for the repository
+// CommitInfo holds basic commit information retrieved from git CLI.
+type CommitInfo struct {
+	Hash    plumbing.Hash
+	Message string
+}
+
+// getLogCommits retrieves commits using git CLI, which works in worktrees.
+// go-git's r.Log() doesn't work in worktrees because it can't access the object store.
+// maxCount limits the number of commits returned (0 means no limit).
+func getLogCommits(fromHash plumbing.Hash, maxCount int) ([]CommitInfo, error) {
+	args := []string{"log", "--format=%H %s", fromHash.String()}
+	if maxCount > 0 {
+		args = []string{"log", fmt.Sprintf("-n%d", maxCount), "--format=%H %s", fromHash.String()}
+	}
+
+	cmd := exec.Command("git", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git log failed: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	commits := make([]CommitInfo, 0, len(lines))
+
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		// Format is "hash message", split at first space
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) < 1 {
+			continue
+		}
+		hash := plumbing.NewHash(parts[0])
+		message := ""
+		if len(parts) > 1 {
+			message = parts[1]
+		}
+		commits = append(commits, CommitInfo{
+			Hash:    hash,
+			Message: message,
+		})
+	}
+
+	return commits, nil
+}
+
+// detectDefaultBranch attempts to determine the default branch name for the repository.
+// Uses CLI instead of go-git because go-git doesn't work properly in worktrees.
 func detectDefaultBranch(r *git.Repository) string {
 	// Common default branch names to check in priority order
 	possibleDefaults := []string{"main", "master", "trunk", "development"}
 
-	// First try to get the HEAD reference of the origin remote
-	remotes, err := r.Remotes()
-	if err == nil && len(remotes) > 0 {
-		// Try to find the origin remote
-		var originRemote *git.Remote
+	// First check if origin remote exists
+	remotesCmd := exec.Command("git", "remote")
+	remotesOutput, err := remotesCmd.Output()
+	if err == nil {
+		remotes := strings.Split(strings.TrimSpace(string(remotesOutput)), "\n")
+		hasOrigin := false
 		for _, remote := range remotes {
-			if remote.Config().Name == "origin" {
-				originRemote = remote
+			if remote == "origin" {
+				hasOrigin = true
 				break
 			}
 		}
 
 		// If we found origin, try to get its HEAD reference
-		if originRemote != nil {
-			// List references from the remote
-			refs, err := r.References()
+		if hasOrigin {
+			// Try to resolve refs/remotes/origin/HEAD
+			cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+			output, err := cmd.Output()
 			if err == nil {
-				// Look for a HEAD symbolic reference
-				refs.ForEach(func(ref *plumbing.Reference) error {
-					if ref.Name().String() == "refs/remotes/origin/HEAD" {
-						// Extract the branch name from the target
-						target := ref.Target().String()
-						if strings.HasPrefix(target, "refs/remotes/origin/") {
-							branch := strings.TrimPrefix(target, "refs/remotes/origin/")
-							possibleDefaults = []string{branch} // Override with the actual default
-							return fmt.Errorf("stop")
-						}
-					}
-					return nil
-				})
+				target := strings.TrimSpace(string(output))
+				if strings.HasPrefix(target, "refs/remotes/origin/") {
+					branch := strings.TrimPrefix(target, "refs/remotes/origin/")
+					possibleDefaults = []string{branch} // Override with the actual default
+				}
 			}
 		}
 	}
 
 	// Check each possible default branch to see if it exists
 	for _, branchName := range possibleDefaults {
-		branchRef, err := r.Reference(plumbing.NewBranchReferenceName(branchName), true)
+		branchRef, err := getReference(r, plumbing.NewBranchReferenceName(branchName))
 		if err == nil && branchRef != nil {
 			return branchName
 		}
@@ -273,14 +381,14 @@ func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName,
 
 	// Ensure the branch we want to update exists locally
 	localRefName := plumbing.NewBranchReferenceName(localBranch)
-	_, err := r.Reference(localRefName, true)
+	_, err := getReference(r, localRefName)
 	if err != nil {
 		return fmt.Errorf("local base branch '%s' not found: %w", localBranch, err)
 	}
 
 	// Ensure the remote tracking branch exists
 	remoteRefName := plumbing.NewRemoteReferenceName(remoteName, localBranch)
-	remoteRef, err := r.Reference(remoteRefName, true)
+	remoteRef, err := getReference(r, remoteRefName)
 	if err != nil {
 		return fmt.Errorf("remote tracking branch '%s' not found: %w", remoteRefName, err)
 	}
@@ -315,7 +423,7 @@ func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName,
 
 // getCurrentBranchName returns the name of the current branch
 func getCurrentBranchName(r *git.Repository) (string, error) {
-	headRef, err := r.Head()
+	headRef, err := getHead(r)
 	if err != nil {
 		return "", fmt.Errorf("failed to get HEAD: %w", err)
 	}

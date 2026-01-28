@@ -77,7 +77,7 @@ func (a *AddCmd) Run(_ *kong.Context) error {
 
 	// Verify the branch to add exists
 	addBranchRefName := plumbing.NewBranchReferenceName(a.Name)
-	addBranchRef, err := r.Reference(addBranchRefName, true)
+	addBranchRef, err := getReference(r, addBranchRefName)
 	if err != nil {
 		return fmt.Errorf("branch '%s' not found in repository", a.Name)
 	}
@@ -142,7 +142,7 @@ func (a *AddCmd) Run(_ *kong.Context) error {
 		}
 
 		baseBranchRefName := plumbing.NewBranchReferenceName(baseBranch)
-		baseBranchRef, err := r.Reference(baseBranchRefName, true)
+		baseBranchRef, err := getReference(r, baseBranchRefName)
 		if err != nil {
 			return fmt.Errorf("base branch '%s' not found in repository", baseBranch)
 		}

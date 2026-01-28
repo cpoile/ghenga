@@ -79,7 +79,7 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 	}
 
 	remoteBranchRefName := plumbing.NewRemoteReferenceName(l.Remote, bottomBranch.Name)
-	_, err = r.Reference(remoteBranchRefName, false) // false = don't resolve symbolic refs
+	_, err = getReference(r, remoteBranchRefName)
 	if err == nil {
 		// Remote branch reference *exists*
 		return fmt.Errorf("remote branch '%s/%s' still exists. Please ensure it is merged and deleted on the remote before landing", l.Remote, bottomBranch.Name)

@@ -7,9 +7,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/fatih/color"
-	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 type LsCmd struct {
@@ -35,7 +33,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 		return err
 	}
 
-	headRef, err := r.Head()
+	headRef, err := getHead(r)
 	if err != nil {
 		return fmt.Errorf("failed to get HEAD: %w", err)
 	}
@@ -81,7 +79,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 			bottomBranch := tower.Branches[0].Name
 			bottomBranchRefName := plumbing.NewBranchReferenceName(bottomBranch)
 			// TODO: need to check remote, not local
-			_, err := r.Reference(bottomBranchRefName, true)
+			_, err := getReference(r, bottomBranchRefName)
 			if err != nil && errors.Is(err, plumbing.ErrReferenceNotFound) {
 				warningColor.Println("  ⚠️ Warning: The bottom branch is no longer valid -- if it has been merged upstream,")
 				warningColor.Println("           you need to run 'ghenga land' to mark the bottom branch as merged.")
@@ -97,14 +95,14 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 		baseCalculationFailed := false
 		if tower.Base != "" && len(tower.Branches) > 0 {
 			// Resolve the configured base branch
-			baseBranchRef, errBase := r.ResolveRevision(plumbing.Revision(tower.Base))
+			baseBranchRef, errBase := resolveRevision(r, plumbing.Revision(tower.Base))
 			if errBase != nil {
 				warningColor.Printf("  ⚠️ Could not resolve base branch '%s': %v\n", tower.Base, errBase)
 				baseCalculationFailed = true
 			} else {
 				// Resolve the first branch of the tower
 				firstTowerBranch := tower.Branches[0]
-				firstTowerBranchRef, errFirst := r.Reference(plumbing.NewBranchReferenceName(firstTowerBranch.Name), true)
+				firstTowerBranchRef, errFirst := getReference(r, plumbing.NewBranchReferenceName(firstTowerBranch.Name))
 				if errFirst != nil {
 					warningColor.Printf("  ⚠️ Could not resolve first tower branch '%s': %v\n", firstTowerBranch.Name, errFirst)
 					baseCalculationFailed = true
@@ -127,7 +125,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 		// First pass: collect branch hashes
 		for i, branch := range tower.Branches {
 			branchRefName := plumbing.NewBranchReferenceName(branch.Name)
-			branchRef, err := r.Reference(branchRefName, true)
+			branchRef, err := getReference(r, branchRefName)
 			if err == nil {
 				branchHashes[i] = branchRef.Hash()
 			}
@@ -138,7 +136,7 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 			branch := tower.Branches[i]
 
 			branchRefName := plumbing.NewBranchReferenceName(branch.Name)
-			branchRef, err := r.Reference(branchRefName, true)
+			branchRef, err := getReference(r, branchRefName)
 			if err != nil && errors.Is(err, plumbing.ErrReferenceNotFound) {
 				// Print branch name even if not found locally, but mark it
 				branchColor.Printf("  %s", branch.Name)
@@ -207,36 +205,32 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 				}
 			}
 
-			// Display commits
-			commitIter, err := r.Log(&git.LogOptions{
-				From:  branchRef.Hash(),
-				Order: git.LogOrderCommitterTime,
-			})
+			// Display commits using git CLI (go-git r.Log() doesn't work in worktrees)
+			allCommits, err := getLogCommits(branchRef.Hash(), MAX_COMMITS_PER_BRANCH_TO_DISPLAY+1)
 			if err != nil {
 				continue
 			}
 
-			var commits []*object.Commit
-			count := 0
-			commitIter.ForEach(func(c *object.Commit) error {
+			// Filter commits based on stop conditions
+			var commits []CommitInfo
+			for _, c := range allCommits {
 				// For the base branch (i==0), stop at the calculated merge base
 				if i == 0 && !calculatedBaseCommit.IsZero() && c.Hash == calculatedBaseCommit {
 					commits = append(commits, c) // Include the merge-base commit itself
-					return fmt.Errorf("stop")
+					break
 				}
 
 				// For non-base branches, stop at the lower branch's commit
 				if foundStopCommit && c.Hash == stopAtCommit {
-					return fmt.Errorf("stop")
+					break
 				}
 
-				if count < MAX_COMMITS_PER_BRANCH_TO_DISPLAY {
+				if len(commits) < MAX_COMMITS_PER_BRANCH_TO_DISPLAY {
 					commits = append(commits, c)
-					count++
-					return nil
+				} else {
+					break
 				}
-				return fmt.Errorf("stop")
-			})
+			}
 
 			for j := range commits {
 				commit := commits[j]
@@ -246,21 +240,18 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 					branchColor.Printf("        If the branch below has been rebased onto its merge-base, you can run\n")
 					branchColor.Printf("        'ghenga rebase from %s [commit-hash]' to rebase this branch onto the branch below.\n", branch.Name)
 					branchColor.Printf("        Use the commit hash from %s that is the first unique commit after the branch below.\n", branch.Name)
-					message := strings.Split(commit.Message, "\n")[0]
-					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
+					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], commit.Message)
 					break
 				}
 
-				message := strings.Split(commit.Message, "\n")[0]
-
 				// Check if this is the calculated base commit or a divergence point
 				if i == 0 && !calculatedBaseCommit.IsZero() && commit.Hash == calculatedBaseCommit {
-					baseCommitColor.Printf("    %s %s (merge-base with %s)\n", commit.Hash.String()[:7], message, tower.Base)
+					baseCommitColor.Printf("    %s %s (merge-base with %s)\n", commit.Hash.String()[:7], commit.Message, tower.Base)
 				} else if divergencePoints[commit.Hash.String()] {
 					// TODO: test this
-					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], message)
+					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], commit.Message)
 				} else {
-					fmt.Printf("    %s %s\n", commit.Hash.String()[:7], message)
+					fmt.Printf("    %s %s\n", commit.Hash.String()[:7], commit.Message)
 				}
 			}
 

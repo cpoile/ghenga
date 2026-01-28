@@ -184,7 +184,7 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 	for i := range currentTower.Branches {
 		branch := &currentTower.Branches[i]
 		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
-		branchRef, err := gitRepo.Reference(branchRefName, true)
+		branchRef, err := getReference(gitRepo, branchRefName)
 		if err != nil {
 			fmt.Printf("  Warning: Could not get current ref for branch '%s' to save undo state: %v\n", branch.Name, err)
 			continue
@@ -202,7 +202,7 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 	originalBranch, err := getCurrentBranchName(gitRepo)
 	if err != nil {
 		fmt.Printf("Warning: Could not determine current branch, defaulting to HEAD: %v\n", err)
-		head, headErr := gitRepo.Head()
+		head, headErr := getHead(gitRepo)
 		if headErr == nil && head != nil {
 			originalBranch = head.Name().Short() // Best effort
 		} else {
@@ -272,7 +272,7 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 			}
 
 			branchRefName := plumbing.NewBranchReferenceName(currentBranchInTower.Name)
-			branchHead, err := gitRepo.Reference(branchRefName, true)
+			branchHead, err := getReference(gitRepo, branchRefName)
 			if err != nil {
 				fmt.Printf("  Skipping branch '%s' from reset plan: does not exist locally.\n", currentBranchInTower.Name)
 				continue
@@ -286,7 +286,7 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 				if firstBranchExcludeBase != "" {
 					baseToUse = firstBranchExcludeBase
 				}
-				newBaseRef, err := gitRepo.ResolveRevision(plumbing.Revision(baseToUse))
+				newBaseRef, err := resolveRevision(gitRepo, plumbing.Revision(baseToUse))
 				if err != nil {
 					if firstBranchExcludeBase != "" {
 						return fmt.Errorf("failed to resolve exclude base '%s': %w", baseToUse, err)
@@ -296,7 +296,7 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 				baseHead = *newBaseRef
 			} else {
 				// Subsequent branches: get commits relative to previous branch
-				prevBranchRef, err := gitRepo.Reference(plumbing.NewBranchReferenceName(baseBranchName), true)
+				prevBranchRef, err := getReference(gitRepo, plumbing.NewBranchReferenceName(baseBranchName))
 				if err != nil {
 					return fmt.Errorf("failed to get reference for base branch '%s': %w", baseBranchName, err)
 				}
@@ -327,14 +327,14 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 			baseBranchInTower := currentTower.Branches[i-1]
 
 			branchRefName := plumbing.NewBranchReferenceName(currentBranchInTower.Name)
-			branchHead, err := gitRepo.Reference(branchRefName, true)
+			branchHead, err := getReference(gitRepo, branchRefName)
 			if err != nil {
 				fmt.Printf("  Skipping branch '%s' from rebase plan: does not exist locally.\n", currentBranchInTower.Name)
 				continue
 			}
 
 			baseRefName := plumbing.NewBranchReferenceName(baseBranchInTower.Name)
-			baseHead, err := gitRepo.Reference(baseRefName, true)
+			baseHead, err := getReference(gitRepo, baseRefName)
 			if err != nil {
 				fmt.Printf("  Skipping branch '%s' from rebase plan: its base '%s' does not exist locally.\n", currentBranchInTower.Name, baseBranchInTower.Name)
 				continue
@@ -965,7 +965,7 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 	if err != nil {
 		fmt.Printf("Warning: Could not determine current branch during undo: %v\n", err)
 		// Attempt to get HEAD as a fallback, but it might not be a branch name
-		headRef, headErr := gitRepo.Head()
+		headRef, headErr := getHead(gitRepo)
 		if headErr == nil && headRef != nil && headRef.Name().IsBranch() {
 			originalBranch = headRef.Name().Short()
 		} else {
@@ -988,14 +988,15 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 		fmt.Printf("  Restoring branch '%s' to commit %s...\n", branch.Name, branch.LastReflogID[:7])
 
 		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
-		_, err := gitRepo.Reference(branchRefName, true)
+		_, err := getReference(gitRepo, branchRefName)
 		branchExists := err == nil
 
 		var cmd *exec.Cmd
 		targetCommit := branch.LastReflogID
-		// Verify the target commit exists before trying to use it
-		_, errCommit := gitRepo.CommitObject(plumbing.NewHash(targetCommit))
-		if errCommit != nil {
+		// Verify the target commit exists before trying to use it (use CLI for worktree support)
+		verifyCmd := exec.Command("git", "cat-file", "-t", targetCommit)
+		verifyCmd.Dir = repoPath
+		if err := verifyCmd.Run(); err != nil {
 			fmt.Printf("  Warning: Cannot restore branch '%s': saved commit %s not found in repository.\n", branch.Name, targetCommit)
 			failedCount++
 			branch.LastReflogID = "" // Clear invalid reflog ID
@@ -1074,14 +1075,14 @@ func parseCommitList(output string) []string {
 // ensuring the commit exists on the specified branch.
 func getFullCommitHashForBranch(repo *git.Repository, repoPath string, branchName string, commitHashStr string) (plumbing.Hash, error) {
 	// 1. Resolve the commitHashStr to a full plumbing.Hash (could be on any branch initially)
-	fullHash, err := repo.ResolveRevision(plumbing.Revision(commitHashStr))
+	fullHash, err := resolveRevision(repo, plumbing.Revision(commitHashStr))
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("could not resolve commit hash '%s': %w", commitHashStr, err)
 	}
 
 	// 2. Get the tip of the branch
 	branchRefName := plumbing.NewBranchReferenceName(branchName)
-	branchHeadRef, err := repo.Reference(branchRefName, true)
+	branchHeadRef, err := getReference(repo, branchRefName)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("could not get reference for branch '%s': %w", branchName, err)
 	}

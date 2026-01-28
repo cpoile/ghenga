@@ -110,12 +110,12 @@ func (b *BaseCmd) Run(_ *kong.Context) error {
 
 	// Validate that the branch exists
 	refName := plumbing.NewBranchReferenceName(b.BaseBranch)
-	_, err = r.Reference(refName, true) // 'true' resolves symbolic refs like HEAD
+	_, err = getReference(r, refName)
 	if err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			// Also check remote refs just in case it's not local yet
 			remoteRefName := plumbing.NewRemoteReferenceName("origin", b.BaseBranch) // Assuming "origin"
-			_, errRem := r.Reference(remoteRefName, true)
+			_, errRem := getReference(r, remoteRefName)
 			if errors.Is(errRem, plumbing.ErrReferenceNotFound) {
 				return fmt.Errorf("branch '%s' not found locally or on origin", b.BaseBranch)
 			} else if errRem != nil {

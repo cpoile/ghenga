@@ -71,7 +71,7 @@ func getPushRemoteForBranch(r *git.Repository, branchName string) (string, error
 // If remoteName is provided, it uses the specified remote name directly.
 func GetBranchPushStatus(r *git.Repository, remoteName string, branchName string) (PushStatus, plumbing.Hash, plumbing.Hash, error) {
 	localRefName := plumbing.NewBranchReferenceName(branchName)
-	localRef, err := r.Reference(localRefName, true)
+	localRef, err := getReference(r, localRefName)
 	if err != nil {
 		// Local branch doesn't exist, which shouldn't happen if it's in the tower config
 		return StatusError, plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get local reference %s: %w", localRefName, err)
@@ -88,7 +88,7 @@ func GetBranchPushStatus(r *git.Repository, remoteName string, branchName string
 	}
 
 	remoteRefName := plumbing.NewRemoteReferenceName(actualRemoteName, branchName)
-	remoteRef, err := r.Reference(remoteRefName, true)
+	remoteRef, err := getReference(r, remoteRefName)
 	if err != nil {
 		if err == plumbing.ErrReferenceNotFound {
 			// Remote branch doesn't exist

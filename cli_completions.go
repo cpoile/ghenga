@@ -4,9 +4,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	kongcompletion "github.com/jotaen/kong-completion"
 	"github.com/posener/complete"
 )
@@ -114,26 +112,21 @@ func (l BranchLister) Predict(args complete.Args) []string {
 	return branches
 }
 
-// fallbackBranchListing provides branch listing without sorting if git command fails
+// fallbackBranchListing provides branch listing using git CLI.
+// go-git's r.References() doesn't work properly in worktrees.
 func fallbackBranchListing() []string {
-	r, err := openGitRepo()
+	cmd := exec.Command("git", "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+	output, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
 
-	refs, err := r.References()
-	if err != nil {
-		return nil
-	}
-
-	branches := make([]string, 0)
-	refs.ForEach(func(ref *plumbing.Reference) error {
-		// Only include local branches
-		if ref.Name().IsBranch() {
-			branches = append(branches, ref.Name().Short())
+	branches := []string{}
+	for _, branch := range strings.Split(string(output), "\n") {
+		if branch != "" {
+			branches = append(branches, branch)
 		}
-		return nil
-	})
+	}
 
 	return branches
 }
@@ -146,6 +139,7 @@ var predictGitRefs = kongcompletion.WithPredictor(
 type GitRefLister struct{}
 
 // PredictGitRefs predicts Git references for the current repository.
+// Uses CLI instead of go-git because go-git doesn't work properly in worktrees.
 func (l GitRefLister) Predict(args complete.Args) []string {
 	_, _, currentTower, _, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
@@ -161,7 +155,7 @@ func (l GitRefLister) Predict(args complete.Args) []string {
 
 	if currentTower == nil || len(currentTower.Branches) == 0 {
 		// Get the current HEAD reference as fallback
-		headRef, err := r.Head()
+		headRef, err := getHead(r)
 		if err != nil {
 			return gitRefs
 		}
@@ -171,34 +165,16 @@ func (l GitRefLister) Predict(args complete.Args) []string {
 			gitRefs = append(gitRefs, headRef.Name().Short())
 		}
 
-		// Get commits from log, ordered by recency
-		logIter, err := r.Log(&git.LogOptions{
-			From:  headRef.Hash(),
-			Order: git.LogOrderCommitterTime,
-		})
+		// Get commits from log using CLI
+		commits, err := getLogCommits(headRef.Hash(), MAX_COMMITS_TO_PREDICT)
 		if err != nil {
 			return gitRefs
 		}
 
-		seenCommits := make(map[string]bool)
-		commitCount := 0
-
-		logIter.ForEach(func(c *object.Commit) error {
-			if commitCount >= MAX_COMMITS_TO_PREDICT {
-				return plumbing.ErrObjectNotFound // Stop after 50 items
-			}
-
-			hash := c.Hash.String()
-			shortHash := hash[:7]
-
-			if !seenCommits[shortHash] {
-				gitRefs = append(gitRefs, shortHash)
-				seenCommits[shortHash] = true
-				commitCount++
-			}
-
-			return nil
-		})
+		for _, c := range commits {
+			shortHash := c.Hash.String()[:7]
+			gitRefs = append(gitRefs, shortHash)
+		}
 
 		return gitRefs
 	}
@@ -206,38 +182,21 @@ func (l GitRefLister) Predict(args complete.Args) []string {
 	firstBranchName := currentTower.Branches[0].Name
 	gitRefs = append(gitRefs, firstBranchName)
 
-	firstBranchRef, err := r.Reference(plumbing.NewBranchReferenceName(firstBranchName), true)
+	firstBranchRef, err := getReference(r, plumbing.NewBranchReferenceName(firstBranchName))
 	if err != nil {
 		return gitRefs
 	}
 
-	logIter, err := r.Log(&git.LogOptions{
-		From:  firstBranchRef.Hash(),
-		Order: git.LogOrderCommitterTime,
-	})
+	// Get commits from log using CLI
+	commits, err := getLogCommits(firstBranchRef.Hash(), MAX_COMMITS_TO_PREDICT)
 	if err != nil {
 		return gitRefs
 	}
 
-	seenCommits := make(map[string]bool)
-	commitCount := 0
-
-	logIter.ForEach(func(c *object.Commit) error {
-		if commitCount >= MAX_COMMITS_TO_PREDICT {
-			return plumbing.ErrObjectNotFound // Stop after 50 items
-		}
-
-		hash := c.Hash.String()
-		shortHash := hash[:7]
-
-		if !seenCommits[shortHash] {
-			gitRefs = append(gitRefs, shortHash)
-			seenCommits[shortHash] = true
-			commitCount++
-		}
-
-		return nil
-	})
+	for _, c := range commits {
+		shortHash := c.Hash.String()[:7]
+		gitRefs = append(gitRefs, shortHash)
+	}
 
 	return gitRefs
 }

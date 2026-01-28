@@ -1,9 +1,13 @@
 package main
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/alecthomas/kong"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/stretchr/testify/assert"
@@ -736,4 +740,173 @@ func TestLsCmd_BaseBranchMissingWarning(t *testing.T) {
 
 	// Verify output contains the warning
 	assert.Contains(t, output, "⚠️ Warning: The bottom branch is no longer valid")
+}
+
+func TestLsCmd_FromWorktree(t *testing.T) {
+	// Setup main repo
+	mainRepoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(mainRepoPath)
+
+	// Create branches for the tower
+	createTestBranch(t, repo, "feature-1", 1)
+	createTestBranch(t, repo, "feature-2", 1)
+
+	// Checkout main
+	err := CheckoutBranch(mainRepoPath, "main")
+	require.NoError(t, err)
+
+	// Create a worktree
+	worktreePath := filepath.Join(filepath.Dir(mainRepoPath), "ls-worktree")
+	defer func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
+		cmd.Dir = mainRepoPath
+		cmd.Run()
+		os.RemoveAll(worktreePath)
+	}()
+
+	cmd := exec.Command("git", "worktree", "add", worktreePath, "feature-1")
+	cmd.Dir = mainRepoPath
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "Failed to create worktree: %s", string(output))
+
+	// Setup config with tower (using main repo path, not worktree path)
+	towers := []*Tower{
+		{
+			Name: "test-tower",
+			Base: "main",
+			Branches: []Branch{
+				{Name: "feature-1"},
+				{Name: "feature-2"},
+			},
+		},
+	}
+
+	// Create a temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	configFilePath := configFile.Name()
+	require.NoError(t, configFile.Close())
+	defer os.Remove(configFilePath)
+
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFilePath)
+	defer func() { ConfigPath = oldConfigPath }()
+
+	config := &Config{
+		Repos: []*RepoInfo{
+			{
+				Path:    mainRepoPath,
+				Current: "test-tower",
+				Towers:  towers,
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Change to worktree directory
+	oldWd, _ := os.Getwd()
+	defer os.Chdir(oldWd)
+	os.Chdir(worktreePath)
+
+	// Run ls command - should work from worktree
+	lsCmd := &LsCmd{}
+	lsOutput, err := CaptureOutput(func() error {
+		return lsCmd.Run(&kong.Context{})
+	})
+	require.NoError(t, err, "LsCmd.Run failed from worktree")
+
+	// Verify branches are found (not marked as "local branch not found")
+	assert.NotContains(t, lsOutput, "local branch not found")
+	assert.NotContains(t, lsOutput, "Could not resolve base branch")
+	assert.Contains(t, lsOutput, "feature-1")
+	assert.Contains(t, lsOutput, "feature-2")
+}
+
+func TestLsCmd_FromWorktree_MergeBase(t *testing.T) {
+	// Setup main repo
+	mainRepoPath, repo := setupTestRepo(t)
+	defer os.RemoveAll(mainRepoPath)
+
+	// Create stacked branches for the tower (feature-1 based on main, feature-2 based on feature-1)
+	createTestBranch(t, repo, "feature-1", 2)
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	err = wt.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName("feature-1"),
+	})
+	require.NoError(t, err)
+	createTestBranch(t, repo, "feature-2", 2)
+
+	// Checkout main
+	err = CheckoutBranch(mainRepoPath, "main")
+	require.NoError(t, err)
+
+	// Create a worktree
+	worktreePath := filepath.Join(filepath.Dir(mainRepoPath), "ls-worktree-mergebase")
+	defer func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
+		cmd.Dir = mainRepoPath
+		cmd.Run()
+		os.RemoveAll(worktreePath)
+	}()
+
+	cmd := exec.Command("git", "worktree", "add", worktreePath, "feature-1")
+	cmd.Dir = mainRepoPath
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "Failed to create worktree: %s", string(output))
+
+	// Setup config with tower (using main repo path)
+	towers := []*Tower{
+		{
+			Name: "test-tower",
+			Base: "main",
+			Branches: []Branch{
+				{Name: "feature-1"},
+				{Name: "feature-2"},
+			},
+		},
+	}
+
+	// Create a temporary config file
+	configFile, err := os.CreateTemp("", "ghenga-config-*.toml")
+	require.NoError(t, err)
+	configFilePath := configFile.Name()
+	require.NoError(t, configFile.Close())
+	defer os.Remove(configFilePath)
+
+	oldConfigPath := ConfigPath
+	ConfigPath = mockedConfigPath(configFilePath)
+	defer func() { ConfigPath = oldConfigPath }()
+
+	config := &Config{
+		Repos: []*RepoInfo{
+			{
+				Path:    mainRepoPath,
+				Current: "test-tower",
+				Towers:  towers,
+			},
+		},
+	}
+	err = SaveConfig(config)
+	require.NoError(t, err)
+
+	// Change to worktree directory
+	oldWd, _ := os.Getwd()
+	defer os.Chdir(oldWd)
+	os.Chdir(worktreePath)
+
+	// Run ls command - should work from worktree including merge-base calculation
+	lsCmd := &LsCmd{}
+	lsOutput, err := CaptureOutput(func() error {
+		return lsCmd.Run(&kong.Context{})
+	})
+	require.NoError(t, err, "LsCmd.Run failed from worktree")
+
+	// Verify no merge-base errors
+	assert.NotContains(t, lsOutput, "Could not find merge base")
+	assert.NotContains(t, lsOutput, "object not found")
+	// Verify the merge-base marker appears (shows it calculated successfully)
+	assert.Contains(t, lsOutput, "(merge-base with main)")
 }
