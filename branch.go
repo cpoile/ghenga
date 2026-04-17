@@ -40,11 +40,6 @@ func GetCurrentTower(repo *RepoInfo) *Tower {
 	return nil
 }
 
-type BranchCmd struct {
-	Add AddCmd `cmd:"add" help:"Add a branch to a tower in current repository"`
-	Rm  RmCmd  `cmd:"rm" help:"Remove a branch from the current tower"`
-}
-
 type AddCmd struct {
 	Name  string `arg:"" help:"Name of the branch to add" predictor:"predictBranches"`
 	Tower string `help:"Name of the tower to add the branch to (optional, defaults to current tower)"`
