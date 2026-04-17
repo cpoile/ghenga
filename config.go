@@ -52,7 +52,9 @@ type RebaseState struct {
 	TemporaryBranch      string             `toml:"temporaryBranch"`      // Temp branch holding picks
 	CurrentCommitIndex   int                `toml:"currentCommitIndex"`   // Index in RemainingCommits that failed or is next
 	RemainingCommits     []string           `toml:"remainingCommits"`     // Commits for the TargetBranch
-	OriginalBranch       string             `toml:"originalBranch"`       // Branch to return to upon completion
+	OriginalBranch       string             `toml:"originalBranch"`       // Branch to return to upon completion (CWD's branch)
+	MainRepoBranch       string             `toml:"mainRepoBranch"`       // Branch the main repo was on before rebase (differs from OriginalBranch when run from worktree)
+	RebasedBranches      []string           `toml:"rebasedBranches"`      // All branch names planned for rebase (for worktree reset filtering)
 	RemainingBranchInfos []BranchRebaseInfo `toml:"remainingBranchInfos"` // Info for branches yet to be processed (including current one if paused)
 }
 

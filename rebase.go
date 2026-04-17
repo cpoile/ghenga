@@ -103,23 +103,37 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 		return fmt.Errorf("a rebase is already in progress for tower '%s'. Resolve conflicts and run 'ghenga rebase continue' or clear the state with 'ghenga rebase cancel'", currentTower.Name)
 	}
 
-	// Check Git Status first
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	// TODO: needed?
-	statusCmd.Dir = repoPath // Ensure command runs in the correct directory
-	output, err := statusCmd.Output()
+	// Check Git Status for main repo and all worktrees
+	// First, detect worktree branches early so we can check their directories
+	worktreeBranches := detectWorktreeBranches(repoPath, currentTower.Branches)
+
+	dirtyDirs, err := checkDirtyDirectories(repoPath, worktreeBranches)
 	if err != nil {
-		return fmt.Errorf("failed to check git status: %w", err)
+		return fmt.Errorf("failed to check for uncommitted changes: %w", err)
 	}
 
-	if len(strings.TrimSpace(string(output))) > 0 {
-		// Check if the only changes are due to an in-progress rebase (e.g., conflicts)
-		isConflict, _ := hasConflicts(repoPath)
-		if !isConflict {
-			return fmt.Errorf("working directory is not clean. Please commit or stash your changes before starting a rebase")
+	if len(dirtyDirs) > 0 {
+		// Check if the main repo changes are due to an in-progress rebase (e.g., conflicts)
+		if _, mainDirty := dirtyDirs[repoPath]; mainDirty {
+			isConflict, _ := hasConflicts(repoPath)
+			if isConflict {
+				return fmt.Errorf("working directory has changes, possibly from a previous rebase attempt. Please resolve conflicts and run 'ghenga rebase continue' or clean the directory")
+			}
 		}
-		// If it IS a conflict state, we should still prevent starting a *new* rebase
-		return fmt.Errorf("working directory has changes, possibly from a previous rebase attempt. Please resolve conflicts and run 'ghenga rebase continue' or clean the directory")
+
+		// Build error message listing all dirty directories
+		errColor := color.New(color.FgRed).Add(color.Bold)
+		var sb strings.Builder
+		sb.WriteString("Cannot start rebase: uncommitted changes detected in:\n")
+		for path, desc := range dirtyDirs {
+			sb.WriteString(fmt.Sprintf("  - %s (%s)\n", path, desc))
+		}
+		sb.WriteString("\nPlease commit or stash changes in all directories before starting a rebase.")
+		if len(worktreeBranches) > 0 {
+			sb.WriteString("\nNote: Worktrees with uncommitted changes would lose those changes during rebase.")
+		}
+		errColor.Print("") // Force color initialization
+		return fmt.Errorf("%s", sb.String())
 	}
 
 	if currentTower.Base == "" {
@@ -198,7 +212,11 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 		return fmt.Errorf("failed to save configuration with branch states: %w", err)
 	}
 
-	// Determine original branch before starting any operations that might change it
+	// Determine original branch before starting any operations that might change it.
+	// We need to track two things:
+	// 1. originalBranch: the branch in the current working directory (may be a worktree)
+	// 2. mainRepoBranch: the branch checked out in the main repo directory
+	// These differ when running ghenga from a worktree directory.
 	originalBranch, err := getCurrentBranchName(gitRepo)
 	if err != nil {
 		fmt.Printf("Warning: Could not determine current branch, defaulting to HEAD: %v\n", err)
@@ -208,6 +226,15 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 		} else {
 			originalBranch = "HEAD" // Fallback
 		}
+	}
+
+	// Save the main repo's branch separately (rebase operations modify its HEAD)
+	mainRepoBranchCmd := exec.Command("git", "branch", "--show-current")
+	mainRepoBranchCmd.Dir = repoPath
+	mainRepoBranchOutput, err := mainRepoBranchCmd.Output()
+	mainRepoBranch := strings.TrimSpace(string(mainRepoBranchOutput))
+	if err != nil || mainRepoBranch == "" {
+		mainRepoBranch = "" // Main repo is in detached HEAD or we couldn't determine it
 	}
 
 	// First pass: collect all branches, their unique commits, and determine which have diverged
@@ -430,6 +457,17 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 			db.Name, db.BaseBranchName, commitCount, commitStr)
 	}
 
+	// Show worktree info if any branches are in worktrees
+	// (We already detected worktreeBranches above and verified they're clean)
+	if len(worktreeBranches) > 0 {
+		warnColor := color.New(color.FgYellow)
+		warnColor.Println("\nNote: The following branches are checked out in worktrees:")
+		for branch, path := range worktreeBranches {
+			fmt.Printf("  - %s -> %s\n", branch, path)
+		}
+		warnColor.Println("After rebase, you'll need to run 'git reset --hard' in each worktree to sync.")
+	}
+
 	// Skip confirmation if skipConfirmation is true
 	if !skipConfirmation {
 		warningColor.Println("\nWARNING: Rebasing will change commit hashes and you will need to force-push to remote branches if they exist.")
@@ -459,12 +497,14 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 
 	// Convert BranchInfo to BranchRebaseInfo for state saving
 	branchRebaseInfos := make([]BranchRebaseInfo, len(branchesToPlan))
+	rebasedBranches := make([]string, len(branchesToPlan))
 	for i, db := range branchesToPlan {
 		branchRebaseInfos[i] = BranchRebaseInfo{
 			Name:           db.Name,
 			BaseBranchName: db.BaseBranchName,
 			UniqueCommits:  db.UniqueCommits,
 		}
+		rebasedBranches[i] = db.Name
 	}
 
 	// Perform rebases sequentially
@@ -498,7 +538,7 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 			return err
 		}
 
-		rebaseStatus := applyCommitsAndHandlePause(config, currentTower, repoPath, curBranchInfo, currentTempBranch, originalBranch, remainingBranchesToRebase, 0)
+		rebaseStatus := applyCommitsAndHandlePause(config, currentTower, repoPath, curBranchInfo, currentTempBranch, originalBranch, mainRepoBranch, rebasedBranches, remainingBranchesToRebase, 0)
 
 		switch rebaseStatus {
 		case errRebasePaused:
@@ -527,9 +567,29 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 	successColor := color.New(color.FgGreen).Add(color.Bold)
 	successColor.Println("\nTower rebase completed successfully! Run 'ghenga sync' to update your remote branches.")
 
-	fmt.Printf("Restoring original branch '%s'...\n", originalBranch)
-	if err := CheckoutBranch(repoPath, originalBranch); err != nil {
-		fmt.Printf("Warning: Failed to checkout original branch '%s': %v\n", originalBranch, err)
+	// Prompt to reset worktrees only for branches that were actually rebased
+	rebasedWorktrees := filterWorktreesByBranches(worktreeBranches, branchRebaseInfos)
+	promptAndResetWorktrees(rebasedWorktrees)
+
+	// Restore the main repo's branch (rebase operations leave it in detached HEAD)
+	if mainRepoBranch != "" {
+		fmt.Printf("Restoring main repo to branch '%s'...\n", mainRepoBranch)
+		if err := CheckoutBranch(repoPath, mainRepoBranch); err != nil {
+			fmt.Printf("Warning: Failed to checkout main repo branch '%s': %v\n", mainRepoBranch, err)
+		}
+	} else if originalBranch != "" && originalBranch != "HEAD" {
+		// Fallback: if main repo branch wasn't captured (e.g., was detached),
+		// try to restore the original branch
+		fmt.Printf("Restoring original branch '%s'...\n", originalBranch)
+		if err := CheckoutBranch(repoPath, originalBranch); err != nil {
+			// Handle worktree case gracefully
+			if worktreePath, _ := isBranchInWorktree(repoPath, originalBranch); worktreePath != "" {
+				fmt.Printf("Note: Branch '%s' is in worktree at '%s'.\n", originalBranch, worktreePath)
+				fmt.Printf("You may want to: cd %s\n", worktreePath)
+			} else {
+				fmt.Printf("Warning: Failed to checkout original branch '%s': %v\n", originalBranch, err)
+			}
+		}
 	}
 
 	// Clear any potential rebase state since we finished successfully
@@ -570,7 +630,8 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 		return nil
 	}
 
-	// Check if we are on the temporary branch. If not, something is wrong.
+	// Check if we are on the temporary branch. If not, we might be in a worktree.
+	runningFromWorktree := false
 	currentGitBranch, err := getCurrentBranchName(gitRepo)
 	if err != nil {
 		// If HEAD is detached, maybe during conflict resolution? Allow it for now.
@@ -580,13 +641,21 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 		}
 		fmt.Println("Warning: HEAD is detached, proceeding with continue operation.")
 	} else if currentGitBranch != state.TemporaryBranch {
-		// If we are on the target branch, it might mean the user aborted and checked it out.
-		// This state is ambiguous. Let's prevent continuation for now.
+		// If we are on the target branch, check if it's in a worktree
+		// This happens when user runs continue from the worktree directory
 		if currentGitBranch == state.TargetBranch {
-			return fmt.Errorf("currently on target branch '%s', expected temporary branch '%s'. Aborting continue. Did you 'git cherry-pick --abort'?", state.TargetBranch, state.TemporaryBranch)
+			if worktreePath, _ := isBranchInWorktree(repoPath, state.TargetBranch); worktreePath != "" {
+				// User is in the worktree - that's OK, we'll operate on the main repo
+				fmt.Printf("Note: Running from worktree '%s'. Operating on main repo at '%s'.\n", worktreePath, repoPath)
+				runningFromWorktree = true
+				// All git commands use repoPath, so we can proceed
+			} else {
+				return fmt.Errorf("currently on target branch '%s', expected temporary branch '%s'. Aborting continue. Did you 'git cherry-pick --abort'?", state.TargetBranch, state.TemporaryBranch)
+			}
+		} else {
+			// Otherwise, it's some other branch, which is definitely wrong.
+			return fmt.Errorf("internal state error: Expected to be on temporary rebase branch '%s', but currently on '%s'. This may happen if the rebase was interrupted and the branch was restored. Try 'ghenga rebase cancel' to clear the state, then restart the operation", state.TemporaryBranch, currentGitBranch)
 		}
-		// Otherwise, it's some other branch, which is definitely wrong.
-		return fmt.Errorf("internal state error: Expected to be on temporary rebase branch '%s', but currently on '%s'. This may happen if the rebase was interrupted and the branch was restored. Try 'ghenga rebase cancel' to clear the state, then restart the operation", state.TemporaryBranch, currentGitBranch)
 	}
 
 	// Try to continue the cherry-pick operation
@@ -609,7 +678,12 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 			conflictColor.Printf("!! Failed to continue cherry-pick.\n")
 			fmt.Printf("Git output:\n%s\n", string(output))
 			conflictColor.Println("There might still be unresolved conflicts, or the commit failed.")
-			fmt.Println("Please check 'git status', resolve any issues, stage changes, and run 'ghenga rebase continue' again.")
+			if runningFromWorktree {
+				fmt.Printf("Please go to the main repo to resolve:\n  cd %s\n", repoPath)
+				fmt.Println("Then check 'git status', resolve any issues, and run 'ghenga rebase continue' again.")
+			} else {
+				fmt.Println("Please check 'git status', resolve any issues, stage changes, and run 'ghenga rebase continue' again.")
+			}
 			return nil // Informational exit, state remains paused.
 		}
 	} else {
@@ -639,7 +713,7 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 		fmt.Printf("Continuing rebase for branch '%s' onto '%s'...\n", currentBranchInfo.Name, currentBranchInfo.BaseBranchName)
 
 		// Apply remaining commits for this branch
-		rebaseStatus := applyCommitsAndHandlePause(config, currentTower, repoPath, currentBranchInfo, currentTempBranch, originalBranch, state.RemainingBranchInfos, startIndex)
+		rebaseStatus := applyCommitsAndHandlePause(config, currentTower, repoPath, currentBranchInfo, currentTempBranch, originalBranch, state.MainRepoBranch, state.RebasedBranches, state.RemainingBranchInfos, startIndex)
 
 		switch rebaseStatus {
 		case errRebasePaused:
@@ -699,10 +773,28 @@ func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
 	successColor := color.New(color.FgGreen).Add(color.Bold)
 	successColor.Println("\nTower rebase completed successfully!")
 
-	// Restore the original branch
-	fmt.Printf("Restoring original branch '%s'...\n", state.OriginalBranch)
-	if err := CheckoutBranch(repoPath, state.OriginalBranch); err != nil {
-		fmt.Printf("Warning: Failed to checkout original branch '%s': %v\n", state.OriginalBranch, err)
+	// Prompt to reset worktrees only for branches that were actually rebased
+	worktreeBranches := detectWorktreeBranches(repoPath, currentTower.Branches)
+	rebasedWorktrees := filterWorktreesByNames(worktreeBranches, state.RebasedBranches)
+	promptAndResetWorktrees(rebasedWorktrees)
+
+	// Restore the main repo's branch (rebase operations leave it in detached HEAD)
+	if state.MainRepoBranch != "" {
+		fmt.Printf("Restoring main repo to branch '%s'...\n", state.MainRepoBranch)
+		if err := CheckoutBranch(repoPath, state.MainRepoBranch); err != nil {
+			fmt.Printf("Warning: Failed to checkout main repo branch '%s': %v\n", state.MainRepoBranch, err)
+		}
+	} else if state.OriginalBranch != "" {
+		// Fallback for older state that doesn't have MainRepoBranch
+		fmt.Printf("Restoring original branch '%s'...\n", state.OriginalBranch)
+		if err := CheckoutBranch(repoPath, state.OriginalBranch); err != nil {
+			if worktreePath, _ := isBranchInWorktree(repoPath, state.OriginalBranch); worktreePath != "" {
+				fmt.Printf("Note: Branch '%s' is in worktree at '%s'.\n", state.OriginalBranch, worktreePath)
+				fmt.Printf("You may want to: cd %s\n", worktreePath)
+			} else {
+				fmt.Printf("Warning: Failed to checkout original branch '%s': %v\n", state.OriginalBranch, err)
+			}
+		}
 	}
 
 	// Clear the rebase state
@@ -749,6 +841,7 @@ func (c *RebaseCancelCmd) Run(_ *kong.Context) error {
 	}
 
 	originalBranch := currentTower.RebaseState.OriginalBranch
+	mainRepoBranch := currentTower.RebaseState.MainRepoBranch
 	temporaryBranchToDelete := currentTower.RebaseState.TemporaryBranch // Store before clearing
 
 	// Clear the rebase state from the configuration
@@ -758,14 +851,24 @@ func (c *RebaseCancelCmd) Run(_ *kong.Context) error {
 	}
 	fmt.Println("  Cleared ghenga rebase state from configuration.")
 
-	// Attempt to checkout the original branch
-	if originalBranch != "" {
-		fmt.Printf("  Attempting to checkout original branch '%s'...\n", originalBranch)
-		if err := CheckoutBranch(repoPath, originalBranch); err != nil {
-			fmt.Printf("  Warning: Failed to checkout original branch '%s': %v\n", originalBranch, err)
-			fmt.Println("  You may need to manually checkout your desired branch.")
+	// Attempt to checkout the main repo's branch (or fall back to original branch)
+	branchToRestore := mainRepoBranch
+	if branchToRestore == "" {
+		branchToRestore = originalBranch
+	}
+	if branchToRestore != "" {
+		fmt.Printf("  Attempting to checkout branch '%s'...\n", branchToRestore)
+		if err := CheckoutBranch(repoPath, branchToRestore); err != nil {
+			// Handle worktree case gracefully
+			if worktreePath, _ := isBranchInWorktree(repoPath, branchToRestore); worktreePath != "" {
+				fmt.Printf("  Note: Branch '%s' is in worktree at '%s'.\n", branchToRestore, worktreePath)
+				fmt.Printf("  You may want to: cd %s\n", worktreePath)
+			} else {
+				fmt.Printf("  Warning: Failed to checkout branch '%s': %v\n", branchToRestore, err)
+				fmt.Println("  You may need to manually checkout your desired branch.")
+			}
 		} else {
-			fmt.Printf("  Successfully checked out branch '%s'.\n", originalBranch)
+			fmt.Printf("  Successfully checked out branch '%s'.\n", branchToRestore)
 		}
 	} else {
 		fmt.Println("  No original branch recorded in rebase state. Please checkout your desired branch manually.")
@@ -804,10 +907,175 @@ func checkoutBranchOrCommit(repoPath, ref string) error {
 	return nil
 }
 
-// prepareForBranchRebase checks out the base branch and creates a new temporary branch for cherry-picking.
+// checkoutCommitDetached checks out a commit in detached HEAD mode.
+// Works even if the ref is a branch checked out in another worktree.
+func checkoutCommitDetached(repoPath, ref string) error {
+	// Resolve ref to commit hash
+	resolveCmd := exec.Command("git", "rev-parse", ref)
+	resolveCmd.Dir = repoPath
+	hashOutput, err := resolveCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to resolve '%s': %w", ref, err)
+	}
+	commitHash := strings.TrimSpace(string(hashOutput))
+
+	// Checkout commit (detached HEAD)
+	checkoutCmd := exec.Command("git", "checkout", "--detach", commitHash)
+	checkoutCmd.Dir = repoPath
+	if output, err := checkoutCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to checkout '%s' detached: %w\nOutput: %s",
+			commitHash[:7], err, string(output))
+	}
+	return nil
+}
+
+// isBranchInWorktree returns the worktree path if the branch is checked out, or empty string.
+func isBranchInWorktree(repoPath, branchName string) (string, error) {
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to list worktrees: %w", err)
+	}
+	path, err := parseWorktreeDir(string(output), branchName)
+	if err != nil {
+		return "", nil // Not in a worktree
+	}
+	return path, nil
+}
+
+// detectWorktreeBranches returns a map of branch names to worktree paths for branches checked out in worktrees.
+func detectWorktreeBranches(repoPath string, branches []Branch) map[string]string {
+	worktreeBranches := make(map[string]string) // branch -> worktree path
+	for _, b := range branches {
+		if path, _ := isBranchInWorktree(repoPath, b.Name); path != "" {
+			worktreeBranches[b.Name] = path
+		}
+	}
+	return worktreeBranches
+}
+
+// isDirty checks if a directory has uncommitted changes (modified, staged, or untracked files).
+func isDirty(dirPath string) (bool, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = dirPath
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("failed to check git status in '%s': %w", dirPath, err)
+	}
+	return len(strings.TrimSpace(string(output))) > 0, nil
+}
+
+// checkDirtyDirectories checks the main repo and all worktree directories for uncommitted changes.
+// Returns a map of directory path -> description of what's dirty, or nil if all clean.
+func checkDirtyDirectories(repoPath string, worktreeBranches map[string]string) (map[string]string, error) {
+	dirtyDirs := make(map[string]string)
+
+	// Check main repo directory
+	dirty, err := isDirty(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	if dirty {
+		dirtyDirs[repoPath] = "main repository"
+	}
+
+	// Check each worktree directory
+	for branch, wtPath := range worktreeBranches {
+		dirty, err := isDirty(wtPath)
+		if err != nil {
+			return nil, err
+		}
+		if dirty {
+			dirtyDirs[wtPath] = fmt.Sprintf("worktree for branch '%s'", branch)
+		}
+	}
+
+	if len(dirtyDirs) == 0 {
+		return nil, nil
+	}
+	return dirtyDirs, nil
+}
+
+// filterWorktreesByBranches returns only the worktree entries whose branch was in the rebased set.
+func filterWorktreesByBranches(worktreeBranches map[string]string, rebasedInfos []BranchRebaseInfo) map[string]string {
+	filtered := make(map[string]string)
+	for _, info := range rebasedInfos {
+		if path, ok := worktreeBranches[info.Name]; ok {
+			filtered[info.Name] = path
+		}
+	}
+	return filtered
+}
+
+// filterWorktreesByNames returns only the worktree entries whose branch name is in the given list.
+func filterWorktreesByNames(worktreeBranches map[string]string, names []string) map[string]string {
+	filtered := make(map[string]string)
+	for _, name := range names {
+		if path, ok := worktreeBranches[name]; ok {
+			filtered[name] = path
+		}
+	}
+	return filtered
+}
+
+// promptAndResetWorktrees displays worktree sync instructions and optionally resets them.
+// Returns true if user chose to reset, false otherwise.
+func promptAndResetWorktrees(worktreeBranches map[string]string) bool {
+	if len(worktreeBranches) == 0 {
+		return false
+	}
+
+	fmt.Println("\n" + strings.Repeat("-", 60))
+	warnColor := color.New(color.FgYellow)
+	warnColor.Println("Worktrees need syncing (uncommitted changes will be lost!):")
+	fmt.Println("Run 'git reset --hard' in each worktree to update working files:")
+	for branch, path := range worktreeBranches {
+		fmt.Printf("  cd %s && git reset --hard  # %s\n", path, branch)
+	}
+
+	fmt.Print("\nWould you like to reset --hard in each worktree now? [y/N]: ")
+	var response string
+	fmt.Scanln(&response)
+
+	if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+		fmt.Println("Skipped. Remember to manually reset worktrees before working in them.")
+		return false
+	}
+
+	// Execute git reset --hard in each worktree
+	successCount := 0
+	failCount := 0
+	for branch, path := range worktreeBranches {
+		fmt.Printf("Resetting worktree '%s' (%s)...\n", branch, path)
+		resetCmd := exec.Command("git", "reset", "--hard")
+		resetCmd.Dir = path
+		if output, err := resetCmd.CombinedOutput(); err != nil {
+			warnColor.Printf("  Failed to reset worktree at '%s': %v\n", path, err)
+			if len(output) > 0 {
+				fmt.Printf("  Output: %s\n", string(output))
+			}
+			failCount++
+		} else {
+			fmt.Printf("  Successfully reset worktree for '%s'\n", branch)
+			successCount++
+		}
+	}
+
+	if failCount > 0 {
+		warnColor.Printf("\nReset %d worktree(s), %d failed.\n", successCount, failCount)
+	} else {
+		successColor := color.New(color.FgGreen)
+		successColor.Printf("\nSuccessfully reset all %d worktree(s).\n", successCount)
+	}
+	return true
+}
+
+// prepareForBranchRebase checks out the base branch (detached) and creates a new temporary branch for cherry-picking.
+// Uses detached HEAD mode to avoid worktree conflicts when the base branch is checked out elsewhere.
 func prepareForBranchRebase(repoPath, baseBranchName, targetBranchName, originalBranch string) (string, error) {
-	fmt.Printf("  Checking out base '%s'...\n", baseBranchName)
-	if err := checkoutBranchOrCommit(repoPath, baseBranchName); err != nil {
+	fmt.Printf("  Checking out base '%s' (detached)...\n", baseBranchName)
+	if err := checkoutCommitDetached(repoPath, baseBranchName); err != nil {
 		return "", fmt.Errorf("failed to checkout base branch '%s': %w", baseBranchName, err)
 	}
 
@@ -817,7 +1085,7 @@ func prepareForBranchRebase(repoPath, baseBranchName, targetBranchName, original
 	createTempCmd.Dir = repoPath
 	if output, err := createTempCmd.CombinedOutput(); err != nil {
 		// Attempt to checkout original branch before returning (best effort)
-		CheckoutBranch(repoPath, originalBranch)
+		checkoutCommitDetached(repoPath, originalBranch)
 		return "", fmt.Errorf("failed to create temporary branch '%s': %w\nOutput:\n%s", tempBranch, err, string(output))
 	}
 	return tempBranch, nil
@@ -830,7 +1098,7 @@ func cherryPickWithRetry(repoPath, commit string) ([]byte, error) {
 
 // applyCommitsAndHandlePause performs the cherry-pick loop for a given branch.
 // It saves state and returns errRebasePaused if a conflict occurs.
-func applyCommitsAndHandlePause(config *Config, tower *Tower, repoPath string, branchInfo BranchRebaseInfo, tempBranch, originalBranch string, remainingBranchInfos []BranchRebaseInfo, startIndex int) error {
+func applyCommitsAndHandlePause(config *Config, tower *Tower, repoPath string, branchInfo BranchRebaseInfo, tempBranch, originalBranch, mainRepoBranch string, rebasedBranches []string, remainingBranchInfos []BranchRebaseInfo, startIndex int) error {
 	for i := startIndex; i < len(branchInfo.UniqueCommits); i++ {
 		commit := branchInfo.UniqueCommits[i]
 		fmt.Printf("  Applying commit %s (%d/%d)...\n", commit[:7], i+1, len(branchInfo.UniqueCommits))
@@ -854,6 +1122,9 @@ func applyCommitsAndHandlePause(config *Config, tower *Tower, repoPath string, b
 				fmt.Println("Please resolve the conflicts, then stage the changes using 'git add <file>...'.")
 			}
 
+			fmt.Printf("\nWorking directory: %s\n", repoPath)
+			fmt.Printf("Current branch: %s\n\n", tempBranch)
+
 			fmt.Println("Once resolved and all files are staged, run 'ghenga rebase continue'.")
 			fmt.Println("To abort the rebase, run 'git cherry-pick --abort' and then manually clean up branches if needed.")
 
@@ -866,6 +1137,8 @@ func applyCommitsAndHandlePause(config *Config, tower *Tower, repoPath string, b
 				CurrentCommitIndex:   i,                        // Index of the failed commit
 				RemainingCommits:     branchInfo.UniqueCommits, // Commits for the current branch being attempted
 				OriginalBranch:       originalBranch,
+				MainRepoBranch:       mainRepoBranch,
+				RebasedBranches:      rebasedBranches,
 				RemainingBranchInfos: remainingBranchInfos, // Pass the current list including the one being processed
 			}
 			if errSave := SaveConfig(config); errSave != nil {
@@ -879,22 +1152,33 @@ func applyCommitsAndHandlePause(config *Config, tower *Tower, repoPath string, b
 	return nil // All commits applied successfully
 }
 
-// finalizeSuccessfulBranchRebase updates the target branch, checks it out, and deletes the temporary branch.
+// finalizeSuccessfulBranchRebase updates the target branch and deletes the temporary branch.
+// Uses detached HEAD mode and update-ref to avoid worktree conflicts when the target branch is checked out elsewhere.
 func finalizeSuccessfulBranchRebase(repoPath, targetBranch, tempBranch, originalBranch string) error {
+	// Get the commit hash of the temp branch
+	revParseCmd := exec.Command("git", "rev-parse", tempBranch)
+	revParseCmd.Dir = repoPath
+	hashOutput, err := revParseCmd.Output()
+	if err != nil {
+		checkoutCommitDetached(repoPath, originalBranch)
+		return fmt.Errorf("failed to get commit hash for temp branch '%s': %w", tempBranch, err)
+	}
+	commitHash := strings.TrimSpace(string(hashOutput))
+
 	fmt.Printf("  Updating branch '%s' to new commit sequence...\n", targetBranch)
-	forceUpdateCmd := exec.Command("git", "branch", "-f", targetBranch, tempBranch)
-	forceUpdateCmd.Dir = repoPath
-	if output, err := forceUpdateCmd.CombinedOutput(); err != nil {
+	// Use update-ref instead of branch -f because update-ref works even when the branch
+	// is checked out in a worktree (branch -f fails in that case)
+	updateRefCmd := exec.Command("git", "update-ref", "refs/heads/"+targetBranch, commitHash)
+	updateRefCmd.Dir = repoPath
+	if output, err := updateRefCmd.CombinedOutput(); err != nil {
 		// Attempt checkout original branch before returning (best effort)
-		CheckoutBranch(repoPath, originalBranch)
-		return fmt.Errorf("failed to update branch '%s' from temp branch '%s': %w\nOutput:\n%s", targetBranch, tempBranch, err, string(output))
+		checkoutCommitDetached(repoPath, originalBranch)
+		return fmt.Errorf("failed to update branch '%s' to commit '%s': %w\nOutput:\n%s", targetBranch, commitHash[:7], err, string(output))
 	}
 
-	// Checkout the updated branch (necessary before deleting temp branch)
-	if err := CheckoutBranch(repoPath, targetBranch); err != nil {
-		// Attempt checkout original branch before returning (best effort)
-		CheckoutBranch(repoPath, originalBranch)
-		return fmt.Errorf("failed to checkout updated branch '%s': %w", targetBranch, err)
+	// Go to detached HEAD at target (avoids worktree conflict, allows temp branch deletion)
+	if err := checkoutCommitDetached(repoPath, targetBranch); err != nil {
+		fmt.Printf("  Warning: failed to checkout target commit: %v\n", err)
 	}
 
 	fmt.Printf("  Cleaning up temporary branch '%s'...\n", tempBranch)
@@ -931,7 +1215,7 @@ func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
 		return fmt.Errorf("failed to check git status: %w", err)
 	}
 	if len(strings.TrimSpace(string(statusOutput))) > 0 {
-		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before undoing rebase")
+		return fmt.Errorf("working directory '%s' is not clean. Please commit or stash your changes before undoing rebase", repoPath)
 	}
 
 	if currentTower.LastRebased == "" {

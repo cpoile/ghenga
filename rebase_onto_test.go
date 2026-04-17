@@ -285,7 +285,7 @@ func TestRebaseOntoCmd_ErrorCases(t *testing.T) {
 
 				return &RebaseOntoCmd{NewBase: "main"}
 			},
-			expectError: "working directory is not clean",
+			expectError: "uncommitted changes detected",
 		},
 		{
 			name: "empty new base argument",

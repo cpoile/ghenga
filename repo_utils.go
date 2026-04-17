@@ -451,7 +451,7 @@ func isWorkingDirectoryClean(r *git.Repository) error {
 
 	// If there's any output, the working directory is not clean
 	if len(strings.TrimSpace(string(output))) > 0 {
-		return fmt.Errorf("working directory is not clean. Please commit or stash your changes")
+		return fmt.Errorf("working directory '%s' is not clean. Please commit or stash your changes", wt.Filesystem.Root())
 	}
 
 	return nil

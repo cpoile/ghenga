@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -36,7 +37,8 @@ func (cmd *SyncDoCmd) Run(ctx *kong.Context) error {
 		return fmt.Errorf("failed to check git status: %w", err)
 	}
 	if len(strings.TrimSpace(string(statusOutput))) > 0 {
-		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before syncing")
+		cwd, _ := os.Getwd()
+		return fmt.Errorf("working directory '%s' is not clean. Please commit or stash your changes before syncing", cwd)
 	}
 
 	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
@@ -360,7 +362,8 @@ func (cmd *SyncUndoCmd) Run(ctx *kong.Context) error {
 		return fmt.Errorf("failed to check git status: %w", err)
 	}
 	if len(strings.TrimSpace(string(statusOutput))) > 0 {
-		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before undoing sync")
+		cwd, _ := os.Getwd()
+		return fmt.Errorf("working directory '%s' is not clean. Please commit or stash your changes before undoing sync", cwd)
 	}
 
 	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()

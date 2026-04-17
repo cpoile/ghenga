@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -21,7 +22,8 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 		return fmt.Errorf("failed to check git status: %w", err)
 	}
 	if len(strings.TrimSpace(string(statusOutput))) > 0 {
-		return fmt.Errorf("working directory is not clean. Please commit or stash your changes before landing")
+		cwd, _ := os.Getwd()
+		return fmt.Errorf("working directory '%s' is not clean. Please commit or stash your changes before landing", cwd)
 	}
 
 	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()

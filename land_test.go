@@ -199,7 +199,7 @@ func TestLandDirtyWorktree(t *testing.T) {
 
 	err = landCmd.Run(kongCtx)
 	require.Error(t, err, "Expected land command to fail with dirty worktree")
-	require.Contains(t, err.Error(), "working directory is not clean", "Error message should mention unclean worktree")
+	require.Contains(t, err.Error(), "is not clean", "Error message should mention unclean worktree")
 }
 
 func TestLandEmptyTower(t *testing.T) {

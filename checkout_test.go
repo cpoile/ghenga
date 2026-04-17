@@ -166,7 +166,7 @@ func TestCheckoutBranch_DirtyWorkingDir(t *testing.T) {
 	// Try to checkout with dirty working directory
 	err = CheckoutBranch(repoPath, "test-branch")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "working directory is not clean")
+	require.Contains(t, err.Error(), "is not clean")
 
 	// Verify we're still on original branch
 	verifyCurrentBranch(t, "main")
