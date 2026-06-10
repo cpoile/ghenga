@@ -1091,9 +1091,13 @@ func prepareForBranchRebase(repoPath, baseBranchName, targetBranchName, original
 	return tempBranch, nil
 }
 
-// cherryPickWithRetry attempts to cherry-pick a commit with retry logic for lock file errors
+// cherryPickWithRetry attempts to cherry-pick a commit with retry logic for lock file errors.
+// --allow-empty preserves commits that were already empty on the tower (e.g. a "no code changes
+// this phase" marker), and --empty=keep keeps commits that become empty because their change is
+// already present in the new base (e.g. after a squash-merge). Both reuse the original commit
+// message and avoid stopping the rebase to demand a manual 'git commit --allow-empty'.
 func cherryPickWithRetry(repoPath, commit string) ([]byte, error) {
-	return runGitCommandWithRetry(repoPath, "cherry-pick", commit)
+	return runGitCommandWithRetry(repoPath, "cherry-pick", "--allow-empty", "--empty=keep", commit)
 }
 
 // applyCommitsAndHandlePause performs the cherry-pick loop for a given branch.

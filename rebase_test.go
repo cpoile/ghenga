@@ -1246,269 +1246,76 @@ func TestRebaseBlocksDirtyWorktrees(t *testing.T) {
 	_ = rebaseOutput // Just to use the variable
 }
 
-func TestRebaseContinueFromWorktreeWithEmptyCommit(t *testing.T) {
-	// This test reproduces the issue where running `ghenga rebase continue` from
-	// a worktree directory fails because it detects we're on the target branch
-	// instead of the temp branch.
-	//
-	// Scenario:
-	// - branch1 commits A
-	// - branch2 starts from branch1, commits B
-	// - branch1 commits C and D (creates divergence)
-	// - branch2 commits E then cherry-picks C (same as branch1's C)
-	// - When we rebase, branch2's C will be empty (already in branch1)
-	// - This causes a pause, user resolves from worktree, runs continue
-
+// TestRebaseKeepsEmptyCommitsWithoutPausing verifies that the rebase runs unattended when a
+// cherry-picked commit is empty — whether it was empty on the tower (e.g. a "no code changes this
+// phase" marker) or becomes empty because its change is already in the new base (e.g. after a
+// squash-merge). Such commits are kept with their original message instead of stopping the rebase
+// to demand a manual 'git commit --allow-empty'.
+func TestRebaseKeepsEmptyCommitsWithoutPausing(t *testing.T) {
 	tempDir, repo := setupTestRepo(t)
 	defer os.RemoveAll(tempDir)
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
 
-	// Create branch1 from main with commit A
-	err = wt.Checkout(&git.CheckoutOptions{
-		Branch: plumbing.NewBranchReferenceName("branch1"),
-		Create: true,
-	})
-	require.NoError(t, err)
+	// branch1 from main with commit A.
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName("branch1"), Create: true}))
 	addSingleCommit(t, tempDir, wt, "fileA.txt", "content A", "Commit A on branch1")
 
-	// Create branch2 from branch1, add commit B
-	err = wt.Checkout(&git.CheckoutOptions{
-		Branch: plumbing.NewBranchReferenceName("branch2"),
-		Create: true,
-	})
-	require.NoError(t, err)
+	// branch2 from branch1 with commit B.
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{
+		Branch: plumbing.NewBranchReferenceName("branch2"), Create: true}))
 	addSingleCommit(t, tempDir, wt, "fileB.txt", "content B", "Commit B on branch2")
 
-	// Go back to branch1 and add commits C and D (creates divergence)
-	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("branch1")})
-	require.NoError(t, err)
+	// branch1 diverges with commits C and D.
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("branch1")}))
 	commitC := addSingleCommit(t, tempDir, wt, "fileC.txt", "content C", "Commit C on branch1")
 	addSingleCommit(t, tempDir, wt, "fileD.txt", "content D", "Commit D on branch1")
 
-	// Go back to branch2 and add commit E, then cherry-pick C
-	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("branch2")})
-	require.NoError(t, err)
+	// branch2: a normal commit E, an intentionally empty marker commit, then a copy of C that
+	// becomes redundant once branch2 is rebased onto branch1 (which already has C).
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("branch2")}))
 	addSingleCommit(t, tempDir, wt, "fileE.txt", "content E", "Commit E on branch2")
+	runGitCommand(t, tempDir, "commit", "--allow-empty", "-m", "Empty marker commit on branch2")
+	runGitCommand(t, tempDir, "cherry-pick", commitC.String())
 
-	// Cherry-pick commit C from branch1 to branch2 (this will be empty during rebase)
-	cherryPickCmd := exec.Command("git", "cherry-pick", commitC.String())
-	cherryPickCmd.Dir = tempDir
-	output, err := cherryPickCmd.CombinedOutput()
-	require.NoError(t, err, "Cherry-pick should succeed: %s", string(output))
-
-	// Go back to main before creating worktree
-	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("main")})
-	require.NoError(t, err)
-
-	// Create worktree for branch2
-	wt2Dir, err := filepath.Abs(filepath.Join(tempDir, "..", "wt-branch2-empty-"+filepath.Base(tempDir)))
-	require.NoError(t, err)
-	cmd := exec.Command("git", "worktree", "add", wt2Dir, "branch2")
-	cmd.Dir = tempDir
-	output, err = cmd.CombinedOutput()
-	require.NoError(t, err, "Failed to create worktree for branch2: %s", string(output))
-	defer os.RemoveAll(wt2Dir)
-
-	// Setup config
+	// Tower [branch1, branch2] on base main.
 	oldWd, _ := os.Getwd()
 	defer os.Chdir(oldWd)
-
-	configTempDir, _ := os.MkdirTemp("", "ghenga-test-empty-commit-config")
+	configTempDir, _ := os.MkdirTemp("", "ghenga-test-empty-keep-config")
 	defer os.RemoveAll(configTempDir)
-
-	configFile := filepath.Join(configTempDir, "config.toml")
 	oldConfigPath := ConfigPath
 	defer func() { ConfigPath = oldConfigPath }()
-	ConfigPath = mockedConfigPath(configFile)
+	ConfigPath = mockedConfigPath(filepath.Join(configTempDir, "config.toml"))
 
-	towers := []*Tower{{
-		Name:     "test-tower",
-		Branches: []Branch{{Name: "branch1"}, {Name: "branch2"}},
-	}}
+	towers := []*Tower{{Name: "test-tower", Branches: []Branch{{Name: "branch1"}, {Name: "branch2"}}}}
 	config := createTestConfig(t, tempDir, "test-tower", towers, "main")
-	SaveConfig(config)
+	require.NoError(t, SaveConfig(config))
 
-	// Start rebase from main repo
-	os.Chdir(tempDir)
-
+	require.NoError(t, os.Chdir(tempDir))
 	restoreStdin := mockInput("y")
 	defer restoreStdin()
 
-	// Run rebase - should pause on empty commit
-	rebaseOutput, rebaseErr := CaptureOutput(func() error {
-		rebaseCmd := &RebaseDoCmd{}
-		return rebaseCmd.Run(nil)
-	})
+	output, err := CaptureOutput(func() error { return (&RebaseDoCmd{}).Run(nil) })
+	t.Logf("Rebase output:\n%s", output)
 
-	// Rebase should have paused (returned nil but printed pause message)
-	require.NoError(t, rebaseErr, "Rebase command should return nil on pause")
-	t.Logf("Rebase output:\n%s", rebaseOutput)
+	// The rebase must run to completion without stopping on the empty/redundant commits.
+	require.NoError(t, err, "rebase should not error")
+	require.NotContains(t, output, "Cherry-pick failed", "empty commits must not pause the rebase")
+	require.Contains(t, output, "rebase completed successfully", "rebase should complete")
 
-	// Verify we got a pause (empty commit causes cherry-pick to fail)
-	assert.Contains(t, rebaseOutput, "Cherry-pick failed", "Should have paused on cherry-pick failure")
-
-	// Now simulate user going to worktree and running continue
-	// WITHOUT first resolving/skipping the empty commit
-	os.Chdir(wt2Dir)
-
-	// Run continue from worktree - this should NOT complete the rebase
-	// because the empty commit hasn't been resolved/skipped
-	continueOutput, continueErr := CaptureOutput(func() error {
-		continueCmd := &RebaseContinueCmd{}
-		return continueCmd.Run(nil)
-	})
-	t.Logf("Continue output:\n%s", continueOutput)
-	t.Logf("Continue error: %v", continueErr)
-
-	// The command returns nil (informational exit) but rebase should NOT be complete
-	require.NoError(t, continueErr, "Continue returns nil even on informational exit")
-	assert.Contains(t, continueOutput, "Operating on main repo",
-		"Should note that it's operating on the main repo")
-
-	// Rebase should NOT have completed - user needs to resolve the empty commit first
-	assert.NotContains(t, continueOutput, "rebase completed successfully",
-		"Rebase should NOT complete without resolving empty commit")
-
-	// User should get guidance about how to resolve the empty commit
-	assert.Contains(t, continueOutput, "cherry-pick --skip",
-		"Should mention --skip option for empty commits")
-	assert.Contains(t, continueOutput, "--allow-empty",
-		"Should mention --allow-empty option for empty commits")
-
-	// User should be told to go to the main repo to resolve
-	assert.Contains(t, continueOutput, "go to the main repo",
-		"Should tell user to go to main repo")
-	assert.Contains(t, continueOutput, tempDir,
-		"Should show the main repo path")
-
-	// Verify rebase state is still in progress
-	configAfterContinue, err := LoadConfig()
+	// No paused rebase state should remain.
+	finalConfig, err := LoadConfig()
 	require.NoError(t, err)
-	towerAfterContinue := findTowerByName(findRepoByPath(configAfterContinue, tempDir), "test-tower")
-	require.NotNil(t, towerAfterContinue)
-	assert.NotNil(t, towerAfterContinue.RebaseState, "RebaseState should still exist - rebase not complete")
-	assert.True(t, towerAfterContinue.RebaseState.IsInProgress, "Rebase should still be in progress")
-}
+	finalTower := findTowerByName(findRepoByPath(finalConfig, tempDir), "test-tower")
+	require.NotNil(t, finalTower)
+	require.Nil(t, finalTower.RebaseState, "no paused rebase state should remain")
 
-func TestRebaseContinueFromWorktreeAfterSkip(t *testing.T) {
-	// This test reproduces the issue where:
-	// 1. Rebase pauses on empty cherry-pick
-	// 2. User runs `git cherry-pick --skip` in the main repo
-	// 3. User goes to worktree directory
-	// 4. User runs `ghenga rebase continue`
-	// 5. Gets unhelpful error about being on target branch
-
-	tempDir, repo := setupTestRepo(t)
-	defer os.RemoveAll(tempDir)
-
-	wt, err := repo.Worktree()
-	require.NoError(t, err)
-
-	// Create branch1 from main with commit A
-	err = wt.Checkout(&git.CheckoutOptions{
-		Branch: plumbing.NewBranchReferenceName("branch1"),
-		Create: true,
-	})
-	require.NoError(t, err)
-	addSingleCommit(t, tempDir, wt, "fileA.txt", "content A", "Commit A on branch1")
-
-	// Create branch2 from branch1, add commit B
-	err = wt.Checkout(&git.CheckoutOptions{
-		Branch: plumbing.NewBranchReferenceName("branch2"),
-		Create: true,
-	})
-	require.NoError(t, err)
-	addSingleCommit(t, tempDir, wt, "fileB.txt", "content B", "Commit B on branch2")
-
-	// Go back to branch1 and add commits C and D (creates divergence)
-	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("branch1")})
-	require.NoError(t, err)
-	commitC := addSingleCommit(t, tempDir, wt, "fileC.txt", "content C", "Commit C on branch1")
-	addSingleCommit(t, tempDir, wt, "fileD.txt", "content D", "Commit D on branch1")
-
-	// Go back to branch2 and add commit E, then cherry-pick C
-	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("branch2")})
-	require.NoError(t, err)
-	addSingleCommit(t, tempDir, wt, "fileE.txt", "content E", "Commit E on branch2")
-
-	// Cherry-pick commit C from branch1 to branch2 (this will be empty during rebase)
-	cherryPickCmd := exec.Command("git", "cherry-pick", commitC.String())
-	cherryPickCmd.Dir = tempDir
-	output, err := cherryPickCmd.CombinedOutput()
-	require.NoError(t, err, "Cherry-pick should succeed: %s", string(output))
-
-	// Go back to main before creating worktree
-	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("main")})
-	require.NoError(t, err)
-
-	// Create worktree for branch2
-	wt2Dir, err := filepath.Abs(filepath.Join(tempDir, "..", "wt-branch2-skip-"+filepath.Base(tempDir)))
-	require.NoError(t, err)
-	cmd := exec.Command("git", "worktree", "add", wt2Dir, "branch2")
-	cmd.Dir = tempDir
-	output, err = cmd.CombinedOutput()
-	require.NoError(t, err, "Failed to create worktree for branch2: %s", string(output))
-	defer os.RemoveAll(wt2Dir)
-
-	// Setup config
-	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-
-	configTempDir, _ := os.MkdirTemp("", "ghenga-test-skip-config")
-	defer os.RemoveAll(configTempDir)
-
-	configFile := filepath.Join(configTempDir, "config.toml")
-	oldConfigPath := ConfigPath
-	defer func() { ConfigPath = oldConfigPath }()
-	ConfigPath = mockedConfigPath(configFile)
-
-	towers := []*Tower{{
-		Name:     "test-tower",
-		Branches: []Branch{{Name: "branch1"}, {Name: "branch2"}},
-	}}
-	config := createTestConfig(t, tempDir, "test-tower", towers, "main")
-	SaveConfig(config)
-
-	// Start rebase from main repo
-	os.Chdir(tempDir)
-
-	restoreStdin := mockInput("y")
-	defer restoreStdin()
-
-	// Run rebase - should pause on empty commit
-	rebaseOutput, rebaseErr := CaptureOutput(func() error {
-		rebaseCmd := &RebaseDoCmd{}
-		return rebaseCmd.Run(nil)
-	})
-	require.NoError(t, rebaseErr, "Rebase command should return nil on pause")
-	t.Logf("Rebase output:\n%s", rebaseOutput)
-	require.Contains(t, rebaseOutput, "Cherry-pick failed", "Should have paused on cherry-pick failure")
-
-	// Step 2: User skips the empty cherry-pick in the main repo
-	skipCmd := exec.Command("git", "cherry-pick", "--skip")
-	skipCmd.Dir = tempDir
-	output, err = skipCmd.CombinedOutput()
-	require.NoError(t, err, "git cherry-pick --skip should succeed: %s", string(output))
-	t.Logf("Skip output: %s", string(output))
-
-	// Step 3: User goes to worktree directory
-	os.Chdir(wt2Dir)
-
-	// Step 4: User runs ghenga rebase continue from worktree
-	// This should work - ghenga should detect we're in a worktree and operate on the main repo
-	continueOutput, continueErr := CaptureOutput(func() error {
-		continueCmd := &RebaseContinueCmd{}
-		return continueCmd.Run(nil)
-	})
-	t.Logf("Continue output:\n%s", continueOutput)
-	t.Logf("Continue error: %v", continueErr)
-
-	// The rebase should complete successfully
-	require.NoError(t, continueErr, "Continue from worktree should succeed")
-	assert.Contains(t, continueOutput, "rebase completed successfully",
-		"Should show success message")
+	// The empty marker commit is preserved with its original message on the rebased branch2.
+	logOut := string(runGitCommand(t, tempDir, "log", "--format=%s", "branch2"))
+	require.Contains(t, logOut, "Empty marker commit on branch2",
+		"empty marker commit should be preserved with its message")
 }
 
 func TestRebaseRestoresMainRepoBranchWhenRunFromWorktree(t *testing.T) {
