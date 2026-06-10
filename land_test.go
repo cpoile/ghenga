@@ -1271,3 +1271,134 @@ func runGitCommand(t *testing.T, dir string, args ...string) []byte {
 	require.NoError(t, err, "git command failed: git %s Output: %s", strings.Join(args, " "), string(output))
 	return output
 }
+
+// TestLandFromFeatureBranchWithIgnoredArtifacts reproduces the failure where landing from a feature
+// branch aborted because updating the base branch checked it out into the working tree. A higher
+// branch in the tower carries a .gitignore that hides build artifacts; the base branch does not.
+// Checking out the base would surface those artifacts as untracked files ("not clean") and prevent
+// switching back to the original branch. Landing must update the base ref without touching the
+// working tree, leaving the user on their branch with the artifacts still ignored.
+func TestLandFromFeatureBranchWithIgnoredArtifacts(t *testing.T) {
+	remoteName := "origin"
+	baseBranchName := "main"
+	towerName := "artifact-tower"
+	bottomBranch := "feat-bottom" // gets "merged" and landed; carries no .gitignore
+	midBranch := "feat-mid"       // adds the .gitignore that hides the artifact
+	topBranch := "feat-top"       // where the user is standing when running land
+
+	localRepoPath, localRepo, _, _, cleanup := setupTestEnvWithRemote(t, remoteName)
+	defer cleanup()
+
+	wt, err := localRepo.Worktree()
+	require.NoError(t, err)
+
+	// Bottom branch: a plain change, no .gitignore. This is what advances the base when "merged".
+	createTestBranch(t, localRepo, bottomBranch, 1)
+	bottomHead, err := localRepo.Reference(plumbing.NewBranchReferenceName(bottomBranch), true)
+	require.NoError(t, err)
+
+	// Mid branch: introduces a .gitignore hiding the artifacts/ directory.
+	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(bottomBranch)})
+	require.NoError(t, err)
+	midRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(midBranch), bottomHead.Hash())
+	require.NoError(t, localRepo.Storer.SetReference(midRef))
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(midBranch)}))
+	addSingleCommit(t, localRepoPath, wt, ".gitignore", "artifacts/\n", "Ignore build artifacts")
+
+	// Top branch: another plain change. This is the branch the user is on during land.
+	createTestBranch(t, localRepo, topBranch, 1)
+
+	// Push everything to the remote.
+	err = localRepo.Push(&git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs: []config.RefSpec{
+			config.RefSpec("refs/heads/" + baseBranchName + ":refs/heads/" + baseBranchName),
+			config.RefSpec("refs/heads/" + bottomBranch + ":refs/heads/" + bottomBranch),
+			config.RefSpec("refs/heads/" + midBranch + ":refs/heads/" + midBranch),
+			config.RefSpec("refs/heads/" + topBranch + ":refs/heads/" + topBranch),
+		},
+	})
+	require.NoError(t, err, "Failed to push initial branches")
+
+	// Simulate merging the bottom branch into the base on the remote, then deleting it. The base now
+	// points at bottomHead, which crucially still does NOT contain the .gitignore.
+	remoteMainRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(baseBranchName), bottomHead.Hash())
+	require.NoError(t, localRepo.Storer.SetReference(remoteMainRef))
+	err = localRepo.Push(&git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs:   []config.RefSpec{config.RefSpec("refs/heads/" + baseBranchName + ":refs/heads/" + baseBranchName)},
+		Force:      true,
+	})
+	if err != nil && !strings.Contains(err.Error(), "already up-to-date") {
+		require.NoError(t, err, "Failed to advance remote base branch")
+	}
+	err = localRepo.Push(&git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs:   []config.RefSpec{config.RefSpec(":refs/heads/" + bottomBranch)},
+	})
+	require.NoError(t, err, "Failed to delete remote bottom branch")
+
+	// Config: tower of the three branches, base = main.
+	cfg := createTestConfig(t, localRepoPath, towerName, []*Tower{
+		{
+			Name: towerName,
+			Base: baseBranchName,
+			Branches: []Branch{
+				{Name: bottomBranch},
+				{Name: midBranch},
+				{Name: topBranch},
+			},
+		},
+	}, baseBranchName)
+	require.NoError(t, SaveConfig(cfg))
+
+	// Stand on the top branch and drop an ignored build artifact into the working tree. The mid
+	// branch's .gitignore (inherited by the top branch) keeps the tree clean.
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(topBranch)}))
+	artifactDir := filepath.Join(localRepoPath, "artifacts")
+	require.NoError(t, os.MkdirAll(artifactDir, 0755))
+	artifactPath := filepath.Join(artifactDir, "build.txt")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("generated output\n"), 0644))
+
+	statusBefore := runGitCommand(t, localRepoPath, "status", "--porcelain")
+	require.Empty(t, strings.TrimSpace(string(statusBefore)), "working tree should be clean (artifact ignored) before land")
+
+	// Run land.
+	landCmd := &LandCmd{Remote: remoteName}
+	parser := kong.Must(&CLI{})
+	kongCtx, _ := parser.Parse([]string{"land"})
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
+
+	output, err := CaptureOutput(func() error { return landCmd.Run(kongCtx) })
+	t.Log("Land command output:\n", output)
+	require.NoError(t, err, "land command should succeed without checking out the base branch")
+
+	// The base must never be checked out; the old, broken flow announced this.
+	require.NotContains(t, output, "Checking out local branch '"+baseBranchName+"'",
+		"land should not check out the base branch")
+
+	// Bottom branch dropped from the tower; mid and top remain.
+	loadedConfig, err := LoadConfig()
+	require.NoError(t, err)
+	currentTower, err := getCurrentTower(loadedConfig.Repos[0])
+	require.NoError(t, err)
+	require.Len(t, currentTower.Branches, 2)
+	require.Equal(t, midBranch, currentTower.Branches[0].Name)
+	require.Equal(t, topBranch, currentTower.Branches[1].Name)
+
+	// Local base advanced to the merged commit.
+	mainRef, err := localRepo.Reference(plumbing.NewBranchReferenceName(baseBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, bottomHead.Hash(), mainRef.Hash(), "local base should be fast-forwarded to the merged commit")
+
+	// The user is still on the top branch, and the working tree is still clean with the artifact intact.
+	headBranch, err := getCurrentBranchName(localRepo)
+	require.NoError(t, err)
+	require.Equal(t, topBranch, headBranch, "user should remain on the original branch after land")
+
+	statusAfter := runGitCommand(t, localRepoPath, "status", "--porcelain")
+	require.Empty(t, strings.TrimSpace(string(statusAfter)), "working tree should still be clean after land")
+	_, statErr := os.Stat(artifactPath)
+	require.NoError(t, statErr, "ignored artifact should be untouched after land")
+}

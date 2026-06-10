@@ -372,7 +372,9 @@ func detectDefaultBranch(r *git.Repository) string {
 	return "main"
 }
 
-// updateLocalBranchFromRemote fetches remote and updates local branch
+// updateLocalBranchFromRemote fetches remote and fast-forwards the local base branch to match it.
+// When the base branch is not the one currently checked out, its ref is advanced directly via
+// update-ref so the working tree is never switched off the current branch.
 func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName, localBranch, currentBranchToPreserve string) error {
 	fmt.Printf("    Fetching remote '%s'...\n", remoteName)
 	if output, err := runGitCommandWithRetry(repoPath, "fetch", remoteName); err != nil {
@@ -381,8 +383,7 @@ func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName,
 
 	// Ensure the branch we want to update exists locally
 	localRefName := plumbing.NewBranchReferenceName(localBranch)
-	_, err := getReference(r, localRefName)
-	if err != nil {
+	if _, err := getReference(r, localRefName); err != nil {
 		return fmt.Errorf("local base branch '%s' not found: %w", localBranch, err)
 	}
 
@@ -393,29 +394,25 @@ func updateLocalBranchFromRemote(repoPath string, r *git.Repository, remoteName,
 		return fmt.Errorf("remote tracking branch '%s' not found: %w", remoteRefName, err)
 	}
 
-	// Checkout the local branch if we are not already on it
-	currentlyOnLocalBranch := currentBranchToPreserve == localBranch
-	if !currentlyOnLocalBranch {
-		fmt.Printf("    Checking out local branch '%s'...\n", localBranch)
-		if err := CheckoutBranch(repoPath, localBranch); err != nil {
-			return fmt.Errorf("failed to checkout local branch '%s': %w", localBranch, err)
+	// If the base branch is the one currently checked out here, reset it in place so the working
+	// tree follows the new commit.
+	if currentBranchToPreserve == localBranch {
+		fmt.Printf("    Resetting '%s' to '%s' (%s)...\n", localBranch, remoteRefName, remoteRef.Hash().String()[:7])
+		if output, err := runGitCommandWithRetry(repoPath, "reset", "--hard", remoteRefName.String()); err != nil {
+			return fmt.Errorf("git reset --hard failed: %w\nOutput: %s", err, string(output))
 		}
+		return nil
 	}
 
-	// Reset the local branch to the remote's state
-	fmt.Printf("    Resetting '%s' to '%s' (%s)...\n", localBranch, remoteRefName, remoteRef.Hash().String()[:7])
-	if output, err := runGitCommandWithRetry(repoPath, "reset", "--hard", remoteRefName.String()); err != nil {
-		// Attempt to checkout original branch even if reset fails
-		return fmt.Errorf("git reset --hard failed: %w\nOutput: %s", err, string(output))
-	}
-
-	// If we checked out the local branch temporarily, check back out to original branch now
-	if !currentlyOnLocalBranch && currentBranchToPreserve != "" {
-		fmt.Printf("    Checking out original branch '%s'...\n", currentBranchToPreserve)
-		if err := CheckoutBranch(repoPath, currentBranchToPreserve); err != nil {
-			// This is problematic, we updated local but couldn't switch back
-			return fmt.Errorf("CRITICAL: failed to checkout original branch '%s' after updating base branch: %w", currentBranchToPreserve, err)
-		}
+	// Otherwise move the base branch ref directly to the remote commit without checking it out.
+	// Checking out the base would switch the working tree off the current branch, and any build
+	// artifacts hidden by the current branch's .gitignore (but not the base branch's) would then
+	// surface as untracked files, leaving the tree "not clean" and stranding us on the base branch.
+	// update-ref touches only the ref, never the working tree, and (unlike 'git branch -f') works
+	// even when the base is checked out in another worktree.
+	fmt.Printf("    Updating base branch '%s' to '%s' (%s)...\n", localBranch, remoteRefName, remoteRef.Hash().String()[:7])
+	if output, err := runGitCommandWithRetry(repoPath, "update-ref", localRefName.String(), remoteRef.Hash().String()); err != nil {
+		return fmt.Errorf("failed to update base branch '%s' to '%s': %w\nOutput: %s", localBranch, remoteRef.Hash().String()[:7], err, string(output))
 	}
 
 	return nil
