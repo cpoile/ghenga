@@ -13,6 +13,12 @@ import (
 // TODO: set remote so we don't need to ask for it
 type LandCmd struct {
 	Remote string `help:"Name of the remote to fetch from/check against" default:"origin"`
+	// SkipSyncCheck bypasses the pre-land divergence check on tower branches. This is for landing
+	// several branches in a row: each land rebases the upper branches, so they read as "diverged"
+	// from their now-stale remotes, and re-syncing between every land would needlessly force-push
+	// and churn CI on branches that are about to be rebased again. Only safe when any divergence is
+	// from your own local rebasing rather than unpushed remote work.
+	SkipSyncCheck bool `help:"Skip the check that tower branches are synced with the remote (for landing several branches before syncing)"`
 }
 
 func (l *LandCmd) Run(ctx *kong.Context) error {
@@ -33,6 +39,14 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 
 	if len(currentTower.Branches) == 0 {
 		return fmt.Errorf("current tower '%s' has no branches to land", currentTower.Name)
+	}
+
+	// Verify every tower worktree is clean *before* doing anything destructive. Landing later rebases
+	// the upper branches in their worktrees, and a dirty worktree would abort that rebase only after
+	// the base branch has been updated and the bottom branch removed from the tower — a half-landed
+	// state. The cwd check above only covers the current directory, not the other worktrees.
+	if err := checkTowerWorktreesClean(repoPath, currentTower.Branches); err != nil {
+		return err
 	}
 
 	r, err := openGitRepo()
@@ -64,7 +78,9 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 		}
 	}()
 
-	if err := validateTowerBranchStatus(r, l.Remote, currentTower); err != nil {
+	if l.SkipSyncCheck {
+		fmt.Println("Skipping tower branch sync check (--skip-sync-check). Remember to 'ghenga sync' once you're done landing.")
+	} else if err := validateTowerBranchStatus(r, l.Remote, currentTower); err != nil {
 		return err
 	}
 

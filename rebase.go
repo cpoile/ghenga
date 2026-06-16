@@ -997,6 +997,30 @@ func checkDirtyDirectories(repoPath string, worktreeBranches map[string]string) 
 	return dirtyDirs, nil
 }
 
+// checkTowerWorktreesClean verifies the main repo and every worktree holding a tower branch is free
+// of uncommitted changes. Land must run this before any destructive step: landing rebases the upper
+// branches in their worktrees, and a dirty worktree aborts that rebase — but by then the base branch
+// has already been updated and the bottom branch removed from the tower, leaving the land half-done.
+// Catching it up front means land either does everything or nothing.
+func checkTowerWorktreesClean(repoPath string, branches []Branch) error {
+	worktreeBranches := detectWorktreeBranches(repoPath, branches)
+	dirtyDirs, err := checkDirtyDirectories(repoPath, worktreeBranches)
+	if err != nil {
+		return fmt.Errorf("failed to check for uncommitted changes: %w", err)
+	}
+	if len(dirtyDirs) == 0 {
+		return nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("uncommitted changes detected in:\n")
+	for path, desc := range dirtyDirs {
+		sb.WriteString(fmt.Sprintf("  - %s (%s)\n", path, desc))
+	}
+	sb.WriteString("\nPlease commit or stash changes in all tower worktrees before landing.")
+	return fmt.Errorf("%s", sb.String())
+}
+
 // filterWorktreesByBranches returns only the worktree entries whose branch was in the rebased set.
 func filterWorktreesByBranches(worktreeBranches map[string]string, rebasedInfos []BranchRebaseInfo) map[string]string {
 	filtered := make(map[string]string)

@@ -202,6 +202,76 @@ func TestLandDirtyWorktree(t *testing.T) {
 	require.Contains(t, err.Error(), "is not clean", "Error message should mention unclean worktree")
 }
 
+// TestLandDirtyTowerWorktree guards the half-land bug: an upper tower branch checked out in a dirty
+// worktree must abort land *before* any destructive step. Previously the dirty-worktree check only
+// ran once land reached the rebase, so the base branch had already been updated and the bottom branch
+// removed from the tower — leaving a half-landed state. Land must now fail fast and change nothing.
+func TestLandDirtyTowerWorktree(t *testing.T) {
+	remoteName := "origin"
+	baseBranchName := "main"
+	towerName := "dirty-wt-tower"
+	branch1Name := "feat-dw-a" // bottom branch (to be landed)
+	branch2Name := "feat-dw-b" // upper branch (rebased on land) - lives in a dirty worktree
+
+	localRepoPath, localRepo, _, _, cleanup := setupTestEnvWithRemote(t, remoteName)
+	defer cleanup()
+
+	wt, err := localRepo.Worktree()
+	require.NoError(t, err)
+
+	// Build a two-branch tower: main -> feat-dw-a -> feat-dw-b
+	createTestBranch(t, localRepo, branch1Name, 1)
+	createTestBranch(t, localRepo, branch2Name, 1)
+
+	// Move the main repo off the upper branch so it can be checked out in a worktree, and leave the
+	// main working tree clean so the cwd check isn't what trips.
+	err = wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(baseBranchName)})
+	require.NoError(t, err)
+
+	// Check out the upper branch in a separate worktree and dirty it with an untracked file.
+	wt2Dir, err := filepath.Abs(filepath.Join(localRepoPath, "..", "wt-"+branch2Name+"-"+filepath.Base(localRepoPath)))
+	require.NoError(t, err)
+	addWt := exec.Command("git", "worktree", "add", wt2Dir, branch2Name)
+	addWt.Dir = localRepoPath
+	output, err := addWt.CombinedOutput()
+	require.NoError(t, err, "Failed to create worktree for %s: %s", branch2Name, string(output))
+	defer os.RemoveAll(wt2Dir)
+	require.NoError(t, os.WriteFile(filepath.Join(wt2Dir, "untracked.txt"), []byte("dirty"), 0644))
+
+	cfg := createTestConfig(t, localRepoPath, towerName, []*Tower{
+		{
+			Name: towerName,
+			Base: baseBranchName,
+			Branches: []Branch{
+				{Name: branch1Name},
+				{Name: branch2Name},
+			},
+		},
+	}, baseBranchName)
+	require.NoError(t, SaveConfig(cfg))
+
+	// Run land - should fail fast on the dirty upper worktree.
+	landCmd := &LandCmd{Remote: remoteName}
+	parser := kong.Must(&CLI{})
+	kongCtx, _ := parser.Parse([]string{"land"})
+
+	err = landCmd.Run(kongCtx)
+	require.Error(t, err, "Expected land to fail when an upper tower worktree is dirty")
+	require.Contains(t, err.Error(), "uncommitted changes detected", "Error should name the dirty-worktree check")
+	require.Contains(t, err.Error(), wt2Dir, "Error should point at the dirty worktree")
+
+	// Nothing destructive should have happened: the bottom branch is still in the tower, and no
+	// rebase was started.
+	loadedConfig, err := LoadConfig()
+	require.NoError(t, err)
+	reloadedTower, err := getCurrentTower(loadedConfig.Repos[0])
+	require.NoError(t, err)
+	require.Len(t, reloadedTower.Branches, 2, "Land must not remove the bottom branch when it aborts on a dirty worktree")
+	require.Equal(t, branch1Name, reloadedTower.Branches[0].Name)
+	require.Equal(t, branch2Name, reloadedTower.Branches[1].Name)
+	require.Nil(t, reloadedTower.RebaseState, "Land must not have started a rebase")
+}
+
 func TestLandEmptyTower(t *testing.T) {
 	remoteName := "origin"
 	baseBranchName := "main"
@@ -314,6 +384,119 @@ func TestLandDivergedBranch(t *testing.T) {
 	require.Error(t, err, "Expected land command to fail with diverged branch")
 	require.Contains(t, err.Error(), "have diverged or are behind the remote", "Error message should mention diverged branch")
 	require.Contains(t, err.Error(), "run 'ghenga rebase'", "Error message should suggest rebase")
+}
+
+// TestLandSkipSyncCheckProceedsWithDivergedBranch verifies that --skip-sync-check lets land proceed
+// when a non-bottom tower branch has diverged from its remote. This supports landing several
+// branches in a row: each land rebases the upper branches, which then read as "diverged" from their
+// stale remotes, and we don't want to force-push/CI-churn them between every land.
+func TestLandSkipSyncCheckProceedsWithDivergedBranch(t *testing.T) {
+	remoteName := "origin"
+	baseBranchName := "main"
+	towerName := "skip-sync-tower"
+	bottomBranch := "feat-bottom"
+	upperBranch := "feat-upper"
+
+	localRepoPath, localRepo, _, _, cleanup := setupTestEnvWithRemote(t, remoteName)
+	defer cleanup()
+
+	wt, err := localRepo.Worktree()
+	require.NoError(t, err)
+
+	// Bottom and upper branches.
+	createTestBranch(t, localRepo, bottomBranch, 1) // file-feat-bottom-0.txt
+	bottomHead, err := localRepo.Reference(plumbing.NewBranchReferenceName(bottomBranch), true)
+	require.NoError(t, err)
+	createTestBranch(t, localRepo, upperBranch, 1) // file-feat-upper-0.txt
+	upperPushedHash, err := localRepo.ResolveRevision(plumbing.Revision("refs/heads/" + upperBranch))
+	require.NoError(t, err)
+
+	// Push all three.
+	err = localRepo.Push(&git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs: []config.RefSpec{
+			config.RefSpec("refs/heads/" + baseBranchName + ":refs/heads/" + baseBranchName),
+			config.RefSpec("refs/heads/" + bottomBranch + ":refs/heads/" + bottomBranch),
+			config.RefSpec("refs/heads/" + upperBranch + ":refs/heads/" + upperBranch),
+		},
+	})
+	require.NoError(t, err)
+
+	// Diverge the UPPER branch from its remote: a local-only commit on one side, a different
+	// remote-only commit on the other, so neither is an ancestor of the other.
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(upperBranch)}))
+	localOnlyHash := addSingleCommit(t, localRepoPath, wt, "local-only.txt", "local", "Local-only commit on upper")
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Hash: *upperPushedHash}))
+	remoteOnlyHash := addSingleCommit(t, localRepoPath, wt, "remote-only.txt", "remote", "Remote-only commit on upper")
+	err = localRepo.Push(&git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs:   []config.RefSpec{config.RefSpec(remoteOnlyHash.String() + ":refs/heads/" + upperBranch)},
+		Force:      true,
+	})
+	require.NoError(t, err, "failed to force-push divergent remote commit")
+	// Local upper points at the local-only side; remote-tracking ref reflects the divergent remote
+	// side (set explicitly so the divergence is detected without relying on push side effects).
+	require.NoError(t, localRepo.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName(upperBranch), localOnlyHash)))
+	require.NoError(t, localRepo.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewRemoteReferenceName(remoteName, upperBranch), remoteOnlyHash)))
+
+	// Sanity check: the upper branch really is diverged before we attempt to land.
+	status, _, _, err := GetBranchPushStatus(localRepo, remoteName, upperBranch)
+	require.NoError(t, err)
+	require.Equal(t, Diverged, status, "upper branch should be diverged for this test to be meaningful")
+
+	// Simulate the bottom branch being merged: advance origin/main to its head and delete the remote branch.
+	require.NoError(t, localRepo.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName(baseBranchName), bottomHead.Hash())))
+	err = localRepo.Push(&git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs:   []config.RefSpec{config.RefSpec("refs/heads/" + baseBranchName + ":refs/heads/" + baseBranchName)},
+		Force:      true,
+	})
+	if err != nil && !strings.Contains(err.Error(), "already up-to-date") {
+		require.NoError(t, err, "failed to advance remote base branch")
+	}
+	err = localRepo.Push(&git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs:   []config.RefSpec{config.RefSpec(":refs/heads/" + bottomBranch)},
+	})
+	require.NoError(t, err, "failed to delete remote bottom branch")
+
+	// Config: tower [bottom, upper], base main.
+	cfg := createTestConfig(t, localRepoPath, towerName, []*Tower{
+		{
+			Name: towerName,
+			Base: baseBranchName,
+			Branches: []Branch{
+				{Name: bottomBranch},
+				{Name: upperBranch},
+			},
+		},
+	}, baseBranchName)
+	require.NoError(t, SaveConfig(cfg))
+
+	// Stand on the upper branch so land has an original branch to restore.
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(upperBranch)}))
+
+	// Land WITH --skip-sync-check: the upper branch's divergence must not block the operation.
+	landCmd := &LandCmd{Remote: remoteName, SkipSyncCheck: true}
+	parser := kong.Must(&CLI{})
+	kongCtx, _ := parser.Parse([]string{"land"})
+	restoreStdin := mockInput("y")
+	defer restoreStdin()
+
+	output, err := CaptureOutput(func() error { return landCmd.Run(kongCtx) })
+	t.Logf("Land output:\n%s", output)
+	require.NoError(t, err, "land should proceed past the diverged upper branch when --skip-sync-check is set")
+
+	// Bottom branch dropped from the tower; upper remains.
+	loadedConfig, err := LoadConfig()
+	require.NoError(t, err)
+	currentTower, err := getCurrentTower(loadedConfig.Repos[0])
+	require.NoError(t, err)
+	require.Len(t, currentTower.Branches, 1)
+	require.Equal(t, upperBranch, currentTower.Branches[0].Name)
 }
 
 func TestLandRemoteAheadBranch(t *testing.T) {
