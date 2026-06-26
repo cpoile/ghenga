@@ -33,12 +33,30 @@ const (
 type Tower struct {
 	Name        string       `toml:"name"`
 	Base        string       `toml:"base"`
-	Strategy    string       `toml:"strategy,omitempty"`     // "rebase" (default) or "merge"
+	Strategy    string       `toml:"strategy,omitempty"` // "rebase" (default) or "merge"
 	Branches    []Branch     `toml:"branches"`
 	LastRebased string       `toml:"last_rebased,omitempty"` // Timestamp of the last rebase operation
 	LastSynced  string       `toml:"last_synced,omitempty"`  // Timestamp of last sync
 	RebaseState *RebaseState `toml:"rebaseState,omitempty"`  // Stores state if a rebase is paused
 	MergeState  *MergeState  `toml:"mergeState,omitempty"`   // Stores state if a merge is paused
+	Checkpoints []Checkpoint `toml:"checkpoints,omitempty"`  // Named snapshots of branch positions
+}
+
+// CheckpointBranch records one branch's position within a checkpoint.
+type CheckpointBranch struct {
+	Name string `toml:"name"`
+	Hash string `toml:"hash"`
+}
+
+// Checkpoint is a named snapshot of a tower: the ordered branch list with each
+// branch's commit hash, plus the base at capture time. 'ghenga restore' moves
+// the branches back to these positions and restores the tower's membership and
+// base. The default Name is a timestamp when none is given.
+type Checkpoint struct {
+	Name     string             `toml:"name"`
+	Created  string             `toml:"created"` // RFC3339 capture time
+	Base     string             `toml:"base"`
+	Branches []CheckpointBranch `toml:"branches"`
 }
 
 // strategy returns the tower's configured strategy, defaulting to rebase when

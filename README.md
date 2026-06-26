@@ -40,6 +40,8 @@ go install github.com/cpoile/ghenga@latest
 - `ghenga sync` — push every branch in the tower to the remote (force-with-lease where needed)
   - `ghenga sync undo` — undo the last sync
 - `ghenga land` — land the bottom branch: pull its merge into the base, drop it from the tower, and rebase the rest (or, on a merge-strategy tower, merge the new base down into the rest)
+- `ghenga checkpoint [name]` — save a snapshot of every branch's position (and the tower's membership and base); `name` defaults to a timestamp
+- `ghenga restore` — list the saved checkpoints and roll the tower back to the one you pick
 - `ghenga config` — print the path to the ghenga config file
 - `ghenga completion` — emit shell completions
 
@@ -316,3 +318,49 @@ Once `auth-models` is squash-merged and its remote branch deleted, run
 Because `main`'s squash commit is now in `auth-handlers`' history, the
 `auth-handlers` PR cleanly shows only its own diff — ready for its own
 squash-merge when its turn comes. Push with `ghenga sync` and repeat.
+
+## Checkpoints
+
+`rebase`, `merge`, and `land` all have a one-step `undo`, but sometimes you want
+a named safety net before a risky operation — or several restore points to
+choose from. Checkpoints record where every branch in the tower points, plus
+the tower's branch list and base, so you can roll the whole stack back later.
+
+Take a snapshot before doing something hairy:
+
+```
+ghenga checkpoint before-big-rebase
+```
+
+The name is optional — leave it off and ghenga names the checkpoint with the
+current date and time. Checkpointing only reads branch positions, so it's safe
+to run with a dirty working tree, and you can keep as many as you like. Re-using
+a name asks before it overwrites the old snapshot.
+
+Later, roll back with:
+
+```
+ghenga restore
+```
+
+`restore` lists the tower's checkpoints, newest first, and asks which one to use:
+
+```
+Checkpoints for tower 'auth':
+  1. before-big-rebase             (2026-06-26 14:02:11)  3 branches [latest]
+  2. 2026-06-25T09-11-03           (2026-06-25 09:11:03)  3 branches
+Pick a checkpoint to restore [1]:
+```
+
+Press enter to take the latest, or pick a number. After you confirm, ghenga:
+
+1. Moves each recorded branch back to its saved commit (recreating the branch
+   if it has since been deleted).
+2. Restores the tower's branch list and base to what they were at checkpoint
+   time — so a branch that was landed and dropped from the tower in the meantime
+   is added back.
+
+Restore rewrites branch refs, so it needs a clean working tree and won't run
+while a rebase or merge is paused mid-conflict. If any branch is checked out in
+a worktree, ghenga offers to reset that worktree to the restored commit. Once
+you've restored, push the branches with `ghenga sync`.

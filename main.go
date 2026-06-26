@@ -79,19 +79,21 @@ func (c *ConfigCmd) Run(_ *kong.Context) error {
 type CLI struct {
 	Globals
 
-	Init     InitCmd    `cmd:"init" help:"Initialize the current repository in ghenga config"`
-	New      NewCmd     `cmd:"new" help:"Create a new tower in current repository and set it as current"`
-	Ls       LsCmd      `cmd:"" help:"List all towers in current repository"`
-	Add      AddCmd     `cmd:"add" help:"Add a branch to the current tower"`
-	BranchRm RmCmd      `cmd:"branch-rm" help:"Remove a branch from the current tower"`
-	Current  CurrentCmd `cmd:"current" help:"Set the current tower"`
-	Rename   RenameCmd  `cmd:"rename" help:"Rename the current tower"`
-	Base     BaseCmd    `cmd:"base" help:"Set the tower's base branch"`
-	TowerRm  RmTowerCmd `cmd:"tower-rm" help:"Remove the specified tower"`
-	Rebase   RebaseCmd  `cmd:"rebase" help:"Rebase divergent tower branches (use 'rebase undo' to undo)"`
-	Merge    MergeCmd   `cmd:"merge" help:"Merge each branch's base down into it for merge-strategy towers (use 'merge undo' to undo)"`
-	Sync     SyncCmd    `cmd:"sync" help:"Synchronize tower branches with remote (use 'sync undo' to undo)"`
-	Land     LandCmd    `cmd:"land" help:"Merge the bottom branch of the tower into the base branch and rebase the rest of the tower"`
+	Init       InitCmd       `cmd:"init" help:"Initialize the current repository in ghenga config"`
+	New        NewCmd        `cmd:"new" help:"Create a new tower in current repository and set it as current"`
+	Ls         LsCmd         `cmd:"" help:"List all towers in current repository"`
+	Add        AddCmd        `cmd:"add" help:"Add a branch to the current tower"`
+	BranchRm   RmCmd         `cmd:"branch-rm" help:"Remove a branch from the current tower"`
+	Current    CurrentCmd    `cmd:"current" help:"Set the current tower"`
+	Rename     RenameCmd     `cmd:"rename" help:"Rename the current tower"`
+	Base       BaseCmd       `cmd:"base" help:"Set the tower's base branch"`
+	TowerRm    RmTowerCmd    `cmd:"tower-rm" help:"Remove the specified tower"`
+	Rebase     RebaseCmd     `cmd:"rebase" help:"Rebase divergent tower branches (use 'rebase undo' to undo)"`
+	Merge      MergeCmd      `cmd:"merge" help:"Merge each branch's base down into it for merge-strategy towers (use 'merge undo' to undo)"`
+	Sync       SyncCmd       `cmd:"sync" help:"Synchronize tower branches with remote (use 'sync undo' to undo)"`
+	Land       LandCmd       `cmd:"land" help:"Merge the bottom branch of the tower into the base branch and rebase the rest of the tower"`
+	Checkpoint CheckpointCmd `cmd:"checkpoint" help:"Snapshot the current commit of every branch in the tower (restore with 'ghenga restore')"`
+	Restore    RestoreCmd    `cmd:"restore" help:"Restore the tower's branches to a saved checkpoint"`
 }
 
 func main() {
