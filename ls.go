@@ -71,6 +71,12 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 			warningColor.Printf(" ⚠️ warning: base not set")
 		}
 
+		// Only surface the strategy when it's the non-default 'merge', to keep the
+		// familiar output unchanged for rebase towers.
+		if tower.strategy() == StrategyMerge {
+			baseCommitColor.Printf(" [strategy: merge]")
+		}
+
 		fmt.Println()
 
 		// TODO: need to rename "base branch" to something else, confusing with "base"

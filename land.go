@@ -61,11 +61,11 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 	}
 	defer func() {
 		if originalBranchName != "" {
-			// Check if rebase is paused - if so, don't restore original branch
-			// because user needs to stay on temporary branch for 'rebase continue'
+			// Check if a rebase or merge is paused — if so, don't restore the original branch
+			// because the user needs to stay on the temporary/detached HEAD for 'continue'.
 			_, _, reloadedTower, _, reloadErr := loadRepoInfoAndCurrentTower()
-			if reloadErr == nil && reloadedTower.RebaseState != nil && reloadedTower.RebaseState.IsInProgress {
-				// Rebase is paused, don't restore original branch
+			if reloadErr == nil && reloadedTower.operationInProgress() {
+				// Operation is paused; leave the user where the conflict resolution happens.
 				return
 			}
 
@@ -117,12 +117,21 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 	fmt.Printf("\nLanding will perform the following actions:\n")
 	fmt.Printf("  - Remove branch '%s' from tower '%s'\n", bottomBranch.Name, currentTower.Name)
 	if remainingBranchCount > 0 {
-		fmt.Printf("  - Rebase %d remaining branch(es) onto updated base '%s'\n", remainingBranchCount, currentTower.Base)
-		fmt.Printf("  - This will change commit hashes and require force-push if branches exist on remote\n")
+		if currentTower.strategy() == StrategyMerge {
+			fmt.Printf("  - Merge updated base '%s' down into %d remaining branch(es)\n", currentTower.Base, remainingBranchCount)
+			fmt.Printf("  - This preserves existing commit hashes — no force-push required\n")
+		} else {
+			fmt.Printf("  - Rebase %d remaining branch(es) onto updated base '%s'\n", remainingBranchCount, currentTower.Base)
+			fmt.Printf("  - This will change commit hashes and require force-push if branches exist on remote\n")
+		}
 	} else {
 		fmt.Printf("  - No remaining branches to rebase (tower will be empty)\n")
 	}
-	fmt.Printf("  - You can undo this operation with 'ghenga rebase undo'\n")
+	if currentTower.strategy() == StrategyMerge {
+		fmt.Printf("  - You can undo this operation with 'ghenga merge undo'\n")
+	} else {
+		fmt.Printf("  - You can undo this operation with 'ghenga rebase undo'\n")
+	}
 
 	fmt.Print("\nProceed with landing? [y/N]: ")
 	var response string
@@ -154,20 +163,48 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 		return fmt.Errorf("failed to save config after removing branch '%s': %w", landedBranchName, err)
 	}
 
-	// --- Rebase remaining branches ---
+	// --- Update or merge remaining branches ---
 	if len(currentTower.Branches) == 0 {
-		fmt.Println("  No remaining branches in the tower to rebase.")
+		fmt.Println("  No remaining branches in the tower to update.")
 		fmt.Printf("\nBranch '%s' landed and removed from tower '%s'. Tower is now empty.\n", landedBranchName, currentTower.Name)
 		return nil
 	}
 
-	// Use rebase infrastructure for all remaining branches (handles single and multiple uniformly)
-	fmt.Printf("  Rebasing remaining branches in tower '%s'...\n", currentTower.Name)
+	if currentTower.strategy() == StrategyMerge {
+		// Merge strategy: merge the updated base down into each remaining branch. This adds a merge
+		// commit to each branch but preserves existing commit hashes so reviewers keep GitHub state.
+		// Pass resetNewBase="" so mergeTowerWithMode uses tower.Base (already fast-forwarded above)
+		// as the merge source for the first remaining branch, then chains upward.
+		fmt.Printf("  Merging updated base into remaining branches in tower '%s'...\n", currentTower.Name)
+		err = mergeTowerWithMode(MergeModeReset, true, "", "")
+		if err == errMergePaused {
+			fmt.Printf("\nLand operation paused due to merge conflicts.\n")
+			fmt.Printf("Resolve conflicts and run 'ghenga merge continue' to complete the landing,\n")
+			fmt.Printf("or run 'ghenga merge cancel' to abort and return to the previous state.\n")
 
+			_, _, reloadedTower, _, reloadErr := loadRepoInfoAndCurrentTower()
+			if reloadErr == nil && reloadedTower.MergeState != nil {
+				targetBranch := reloadedTower.MergeState.TargetBranch
+				baseBranch := reloadedTower.MergeState.BaseBranch
+				return fmt.Errorf("failed during merge of updated base into remaining tower branches: failed to merge '%s' into '%s'", baseBranch, targetBranch)
+			}
+			return fmt.Errorf("failed during merge of updated base into remaining tower branches")
+		}
+		if err != nil {
+			return fmt.Errorf("failed to merge updated base into remaining tower branches: %w", err)
+		}
+		fmt.Println("  Successfully merged updated base into all remaining branches.")
+
+		fmt.Printf("\nBranch '%s' landed and removed from tower '%s'. Remaining branches updated via merge.\n", landedBranchName, currentTower.Name)
+		return nil
+	}
+
+	// Rebase strategy: rebase each remaining branch onto the updated base, rewriting commit hashes.
 	// Use RebaseModeReset with firstBranchExcludeBase to:
 	// - Rebase first remaining branch onto currentTower.Base, excluding commits from landedBranchName
 	// - Rebase subsequent branches onto their predecessors
 	// This gives us state tracking, undo support, and conflict handling
+	fmt.Printf("  Rebasing remaining branches in tower '%s'...\n", currentTower.Name)
 	err = rebaseTowerWithMode(RebaseModeReset, true, "", "", currentTower.Base, landedBranchName)
 	if err == errRebasePaused {
 		// Rebase paused due to conflicts - delegate to rebase infrastructure for resolution

@@ -89,6 +89,7 @@ type CLI struct {
 	Base     BaseCmd    `cmd:"base" help:"Set the tower's base branch"`
 	TowerRm  RmTowerCmd `cmd:"tower-rm" help:"Remove the specified tower"`
 	Rebase   RebaseCmd  `cmd:"rebase" help:"Rebase divergent tower branches (use 'rebase undo' to undo)"`
+	Merge    MergeCmd   `cmd:"merge" help:"Merge each branch's base down into it for merge-strategy towers (use 'merge undo' to undo)"`
 	Sync     SyncCmd    `cmd:"sync" help:"Synchronize tower branches with remote (use 'sync undo' to undo)"`
 	Land     LandCmd    `cmd:"land" help:"Merge the bottom branch of the tower into the base branch and rebase the rest of the tower"`
 }

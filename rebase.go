@@ -34,6 +34,9 @@ type RebaseDoCmd struct {
 }
 
 func (r *RebaseDoCmd) Run(_ *kong.Context) error {
+	if err := ensureTowerStrategy(StrategyRebase); err != nil {
+		return err
+	}
 	err := rebaseTower(false, "", "")
 	if err == errRebasePaused {
 		return nil // Successfully paused - return success to CLI
@@ -47,6 +50,9 @@ type RebaseFromCmd struct {
 }
 
 func (r *RebaseFromCmd) Run(_ *kong.Context) error {
+	if err := ensureTowerStrategy(StrategyRebase); err != nil {
+		return err
+	}
 	return rebaseTower(false, r.Branch, r.FromCommit)
 }
 
@@ -55,6 +61,9 @@ type RebaseOntoCmd struct {
 }
 
 func (r *RebaseOntoCmd) Run(_ *kong.Context) error {
+	if err := ensureTowerStrategy(StrategyRebase); err != nil {
+		return err
+	}
 	// Basic validation only
 	if r.NewBase == "" {
 		return fmt.Errorf("new base argument is required")
@@ -604,6 +613,9 @@ func rebaseTowerWithMode(mode RebaseMode, skipConfirmation bool, partialRebaseBr
 type RebaseContinueCmd struct{}
 
 func (c *RebaseContinueCmd) Run(_ *kong.Context) error {
+	if err := ensureTowerStrategy(StrategyRebase); err != nil {
+		return err
+	}
 	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower() // Use existing loader
 	if err != nil {
 		return err
@@ -811,6 +823,9 @@ type RebaseCancelCmd struct{}
 
 // Run executes the logic to cancel an in-progress rebase.
 func (c *RebaseCancelCmd) Run(_ *kong.Context) error {
+	if err := ensureTowerStrategy(StrategyRebase); err != nil {
+		return err
+	}
 	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
 		return err
@@ -1223,135 +1238,10 @@ type RebaseUndoCmd struct {
 }
 
 func (r *RebaseUndoCmd) Run(_ *kong.Context) error {
-	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
-	if err != nil {
-		// If the error is specifically about rebase state, offer to clear it?
-		// No, undo should work independently of paused state.
+	if err := ensureTowerStrategy(StrategyRebase); err != nil {
 		return err
 	}
-
-	// Check if a rebase is *paused* - undoing while paused is confusing.
-	if currentTower.RebaseState != nil && currentTower.RebaseState.IsInProgress {
-		return fmt.Errorf("a rebase operation is currently paused. Please either complete it using 'ghenga rebase continue' or abort it ('git cherry-pick --abort') before attempting to undo the *previous* completed rebase")
-	}
-
-	// Check Git Status first
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = repoPath
-	statusOutput, err := statusCmd.Output()
-	if err != nil {
-		return fmt.Errorf("failed to check git status: %w", err)
-	}
-	if len(strings.TrimSpace(string(statusOutput))) > 0 {
-		return fmt.Errorf("working directory '%s' is not clean. Please commit or stash your changes before undoing rebase", repoPath)
-	}
-
-	if currentTower.LastRebased == "" {
-		return fmt.Errorf("no previous completed rebase found to undo for tower '%s'", currentTower.Name)
-	}
-
-	branchesToRestore := 0
-	for _, branch := range currentTower.Branches {
-		if branch.LastReflogID != "" {
-			branchesToRestore++
-		}
-	}
-
-	if branchesToRestore == 0 {
-		// This might happen if the save failed after setting LastRebased timestamp
-		fmt.Printf("Warning: Found rebase timestamp (%s) but no branch states to restore in tower '%s'. Clearing timestamp.\n", currentTower.LastRebased, currentTower.Name)
-		currentTower.LastRebased = ""
-		if err := SaveConfig(config); err != nil {
-			return fmt.Errorf("failed to clear inconsistent rebase timestamp: %w", err)
-		}
-		return fmt.Errorf("no branch states found to restore in tower '%s'", currentTower.Name)
-	}
-
-	gitRepo, err := openGitRepo()
-	if err != nil {
-		return err
-	}
-
-	// Determine original branch before attempting to restore other branches
-	originalBranch, err := getCurrentBranchName(gitRepo)
-	if err != nil {
-		fmt.Printf("Warning: Could not determine current branch during undo: %v\n", err)
-		// Attempt to get HEAD as a fallback, but it might not be a branch name
-		headRef, headErr := getHead(gitRepo)
-		if headErr == nil && headRef != nil && headRef.Name().IsBranch() {
-			originalBranch = headRef.Name().Short()
-		} else {
-			originalBranch = "HEAD" // Fallback, may not be a checkoutable branch
-		}
-	}
-
-	fmt.Println("Attempting to restore branches...")
-	// For each branch in the tower, try to restore it using its stored reflog ID
-	restoredCount := 0
-	failedCount := 0
-	// Iterate backwards to handle potential dependencies? Maybe not necessary here.
-	for i := len(currentTower.Branches) - 1; i >= 0; i-- {
-		branch := &currentTower.Branches[i]
-
-		if branch.LastReflogID == "" {
-			continue
-		}
-
-		fmt.Printf("  Restoring branch '%s' to commit %s...\n", branch.Name, branch.LastReflogID[:7])
-
-		branchRefName := plumbing.NewBranchReferenceName(branch.Name)
-		_, err := getReference(gitRepo, branchRefName)
-		branchExists := err == nil
-
-		var cmd *exec.Cmd
-		targetCommit := branch.LastReflogID
-		// Verify the target commit exists before trying to use it (use CLI for worktree support)
-		verifyCmd := exec.Command("git", "cat-file", "-t", targetCommit)
-		verifyCmd.Dir = repoPath
-		if err := verifyCmd.Run(); err != nil {
-			fmt.Printf("  Warning: Cannot restore branch '%s': saved commit %s not found in repository.\n", branch.Name, targetCommit)
-			failedCount++
-			branch.LastReflogID = "" // Clear invalid reflog ID
-			continue
-		}
-
-		if branchExists {
-			cmd = exec.Command("git", "update-ref", branchRefName.String(), branch.LastReflogID)
-		} else {
-			cmd = exec.Command("git", "branch", branch.Name, branch.LastReflogID)
-		}
-		cmd.Dir = repoPath
-
-		if output, err := cmd.CombinedOutput(); err != nil {
-			fmt.Printf("  Warning: Failed to restore branch '%s': %v\nOutput:\n%s", branch.Name, err, string(output))
-			failedCount++
-		} else {
-			fmt.Printf("  Successfully restored branch '%s'\n", branch.Name)
-			restoredCount++
-			branch.LastReflogID = ""
-		}
-	}
-
-	currentTower.LastRebased = ""
-
-	if err := SaveConfig(config); err != nil {
-		return fmt.Errorf("failed to update configuration: %w", err)
-	}
-
-	// Restore original branch if possible
-	if originalBranch != "HEAD" {
-		fmt.Printf("Restoring original branch '%s'...\n", originalBranch)
-		if err := CheckoutBranch(repoPath, originalBranch); err != nil {
-			fmt.Printf("Warning: Failed to checkout original branch '%s': %v\n", originalBranch, err)
-		}
-	}
-
-	fmt.Printf("\nUndo operation finished. Restored %d branches.\n", restoredCount)
-	if failedCount > 0 {
-		warningColor := color.New(color.FgRed).Add(color.Bold)
-		warningColor.Printf("Failed to restore %d branches (see warnings above).\n", failedCount)
-	}
-	return nil
+	return restoreTowerToReflog(StrategyRebase)
 }
 
 // cmdOutput executes a command and returns its stdout or an error.

@@ -95,6 +95,9 @@ func (r *RenameCmd) Run(_ *kong.Context) error {
 
 type BaseCmd struct {
 	BaseBranch string `arg:"" help:"Branch name to set as the tower's base" predictor:"predictGitRefs"`
+	// The trailing comma in enum allows the empty string, meaning "leave the
+	// tower's current strategy unchanged".
+	Strategy string `help:"Tower strategy: 'rebase' (rewrite commits up) or 'merge' (merge base down, preserves reviewer state on higher PRs)" enum:"rebase,merge," default:""`
 }
 
 func (b *BaseCmd) Run(_ *kong.Context) error {
@@ -127,13 +130,37 @@ func (b *BaseCmd) Run(_ *kong.Context) error {
 		}
 	}
 
+	// Handle an optional strategy change. Changing strategy mid-operation could
+	// corrupt an in-flight rebase/merge, so block it; otherwise warn and confirm,
+	// since the two strategies produce very different history.
+	if b.Strategy != "" && b.Strategy != currentTower.strategy() {
+		if currentTower.operationInProgress() {
+			return fmt.Errorf("a merge/rebase is in progress for tower '%s'. Finish or cancel it before changing strategy", currentTower.Name)
+		}
+
+		warningColor := color.New(color.FgYellow).Add(color.Bold)
+		warningColor.Printf("WARNING: changing strategy '%s' -> '%s' for tower '%s'.\n", currentTower.strategy(), b.Strategy, currentTower.Name)
+		fmt.Println("Existing branch history won't be rewritten; the new strategy applies to future merge/land/sync operations.")
+		fmt.Print("Continue? [y/N]: ")
+
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+			fmt.Println("Strategy change cancelled. Base branch not updated.")
+			return nil
+		}
+	}
+
 	currentTower.Base = b.BaseBranch // Store the branch name
+	if b.Strategy != "" {
+		currentTower.Strategy = b.Strategy
+	}
 
 	if err := SaveConfig(config); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
 
-	fmt.Printf("Set base branch for tower '%s' to '%s' in repository at '%s'\n", currentTower.Name, currentTower.Base, repoPath)
+	fmt.Printf("Set base branch for tower '%s' to '%s' (strategy: %s) in repository at '%s'\n", currentTower.Name, currentTower.Base, currentTower.strategy(), repoPath)
 	return nil
 }
 

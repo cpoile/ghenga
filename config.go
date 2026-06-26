@@ -20,14 +20,40 @@ type RepoInfo struct {
 	Towers  []*Tower `toml:"towers"`
 }
 
+// Tower strategy values. A tower either rebases its branches up onto a moving
+// base (rewriting commits) or merges the base down into each branch (preserving
+// commits, which keeps reviewer state on higher PRs). An empty Strategy means
+// rebase, so towers created before this field existed keep working unchanged.
+const (
+	StrategyRebase = "rebase"
+	StrategyMerge  = "merge"
+)
+
 // Tower represents a stack of branches
 type Tower struct {
 	Name        string       `toml:"name"`
 	Base        string       `toml:"base"`
+	Strategy    string       `toml:"strategy,omitempty"`     // "rebase" (default) or "merge"
 	Branches    []Branch     `toml:"branches"`
 	LastRebased string       `toml:"last_rebased,omitempty"` // Timestamp of the last rebase operation
 	LastSynced  string       `toml:"last_synced,omitempty"`  // Timestamp of last sync
 	RebaseState *RebaseState `toml:"rebaseState,omitempty"`  // Stores state if a rebase is paused
+	MergeState  *MergeState  `toml:"mergeState,omitempty"`   // Stores state if a merge is paused
+}
+
+// strategy returns the tower's configured strategy, defaulting to rebase when
+// unset (for backward compatibility with towers created before strategies).
+func (t *Tower) strategy() string {
+	if t.Strategy == StrategyMerge {
+		return StrategyMerge
+	}
+	return StrategyRebase
+}
+
+// operationInProgress reports whether a rebase or merge is paused mid-conflict.
+func (t *Tower) operationInProgress() bool {
+	return (t.RebaseState != nil && t.RebaseState.IsInProgress) ||
+		(t.MergeState != nil && t.MergeState.IsInProgress)
 }
 
 // Branch represents a git branch
@@ -42,6 +68,27 @@ type BranchRebaseInfo struct {
 	Name           string   `toml:"name"`
 	BaseBranchName string   `toml:"baseBranchName"`
 	UniqueCommits  []string `toml:"uniqueCommits"`
+}
+
+// BranchMergeInfo is the minimal info needed to merge a branch's base into it
+// when resuming a paused merge.
+type BranchMergeInfo struct {
+	Name           string `toml:"name"`
+	BaseBranchName string `toml:"baseBranchName"` // ref to merge into Name
+}
+
+// MergeState stores the information needed to resume a paused merge operation.
+// Unlike a rebase (which replays commits one at a time), a merge is atomic per
+// branch, so there is no per-commit index to track — only which branch is being
+// merged and which branches remain.
+type MergeState struct {
+	IsInProgress      bool              `toml:"isInProgress"`
+	TargetBranch      string            `toml:"targetBranch"`      // branch currently being merged into
+	BaseBranch        string            `toml:"baseBranch"`        // ref being merged into TargetBranch
+	OriginalBranch    string            `toml:"originalBranch"`    // branch to restore upon completion (cwd's branch)
+	MainRepoBranch    string            `toml:"mainRepoBranch"`    // branch the main repo was on (differs from OriginalBranch when run from worktree)
+	MergedBranches    []string          `toml:"mergedBranches"`    // all branch names in this operation (for worktree reset filtering)
+	RemainingBranches []BranchMergeInfo `toml:"remainingBranches"` // branches yet to be processed (including the current one if paused)
 }
 
 // RebaseState stores the necessary information to resume a paused rebase operation
