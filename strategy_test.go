@@ -86,6 +86,34 @@ func TestStrategy_BaseSetsStrategyWithConfirm(t *testing.T) {
 	assert.Equal(t, StrategyMerge, tower.strategy(), "strategy should now be merge")
 }
 
+func TestStrategy_CommandSetsStrategyWithoutChangingBase(t *testing.T) {
+	_, cleanup := makeStrategyTower(t, "") // starts as rebase
+	defer cleanup()
+
+	restore := mockInput("y")
+	cmd := &StrategyCmd{Strategy: StrategyMerge}
+	out, err := CaptureOutput(func() error { return cmd.Run(&kong.Context{}) })
+	restore()
+	require.NoError(t, err)
+	assert.Contains(t, out, "Set strategy")
+
+	config, err := LoadConfig()
+	require.NoError(t, err)
+	tower := findTowerByName(config.Repos[0], "strat-tower")
+	require.NotNil(t, tower)
+	assert.Equal(t, "main", tower.Base, "strategy command must not change the base")
+	assert.Equal(t, StrategyMerge, tower.strategy())
+}
+
+func TestStrategy_CommandIsRegistered(t *testing.T) {
+	parser := kong.Must(&CLI{})
+
+	for _, strategy := range []string{StrategyMerge, StrategyRebase} {
+		_, err := parser.Parse([]string{"strategy", strategy})
+		require.NoError(t, err)
+	}
+}
+
 func TestStrategy_BaseChangeDeclinedLeavesUnchanged(t *testing.T) {
 	repoPath, cleanup := makeStrategyTower(t, StrategyMerge)
 	defer cleanup()

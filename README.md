@@ -22,6 +22,7 @@ go install github.com/cpoile/ghenga@latest
 - `ghenga rename <new-name>` — rename the current tower
 - `ghenga base <branch>` — set the current tower's base branch (e.g. `main`)
   - `ghenga base <branch> --strategy=merge` — set the base *and* switch the tower to the merge strategy (see [Two strategies](#two-strategies-rebase-vs-merge)); `--strategy=rebase` is the default
+- `ghenga strategy <merge|rebase>` — set the current tower's strategy without changing its base branch
 - `ghenga add <branch>` — add an existing branch to the current tower
 - `ghenga branch-rm <branch>` — remove a branch from the current tower (the git branch itself is untouched)
 - `ghenga tower-rm <tower>` — remove a tower

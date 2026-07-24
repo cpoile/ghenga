@@ -792,3 +792,91 @@ func TestLandMerge_BaseAdvancedIndependently(t *testing.T) {
 	// merge-base(b1, main) == tip(main) so double-diff is gone.
 	assertMergeBaseEquals(t, localRepoPath, "b1", "main", mainTip)
 }
+
+// TestLandMerge_SquashDuplicationAutoResolves reproduces the real-world failure:
+// the branch above the landed branch MODIFIES a file the landed branch created, so
+// the squash commit on the base and the branch's copy differ. Without -X ours this
+// add/add collision conflicts; with it, land must complete cleanly, keep the
+// branch's version of the shared file, AND still pull in a genuine base-only change.
+func TestLandMerge_SquashDuplicationAutoResolves(t *testing.T) {
+	remoteName := "origin"
+	localRepoPath, localRepo, _, _, cleanup := setupTestEnvWithRemote(t, remoteName)
+	defer cleanup()
+
+	wt, err := localRepo.Worktree()
+	require.NoError(t, err)
+
+	showFile := func(branch, path string) string {
+		cmd := exec.Command("git", "show", branch+":"+path)
+		cmd.Dir = localRepoPath
+		out, ferr := cmd.Output()
+		require.NoError(t, ferr, "git show %s:%s", branch, path)
+		return string(out)
+	}
+
+	// b0 creates shared.txt; b1 (stacked on b0) extends shared.txt and adds its own
+	// file. Extending shared.txt is what makes the squash an add/add *conflict*.
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("b0"), Create: true}))
+	addSingleCommit(t, localRepoPath, wt, "shared.txt", "b0 line\n", "b0: add shared.txt")
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("b1"), Create: true}))
+	addSingleCommit(t, localRepoPath, wt, "shared.txt", "b0 line\nb1 addition\n", "b1: extend shared.txt")
+	addSingleCommit(t, localRepoPath, wt, "b1-only.txt", "b1 only\n", "b1: add b1-only.txt")
+
+	require.NoError(t, localRepo.Push(&git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs: []config.RefSpec{
+			"refs/heads/main:refs/heads/main",
+			"refs/heads/b0:refs/heads/b0",
+			"refs/heads/b1:refs/heads/b1",
+		},
+	}))
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("main")}))
+
+	towers := []*Tower{{
+		Name: "sq", Strategy: StrategyMerge, Base: "main",
+		Branches: []Branch{{Name: "b0"}, {Name: "b1"}},
+	}}
+	require.NoError(t, SaveConfig(createTestConfig(t, localRepoPath, "sq", towers, "main")))
+
+	// Squash-merge b0 into main and delete its remote branch.
+	squash := squashMergeAndDeleteRemote(t, localRepoPath, localRepo, remoteName, "main", "b0")
+
+	// Add an independent base-only commit on top of the squash, to prove -X ours
+	// still applies genuine (non-conflicting) base changes.
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Hash: squash}))
+	addSingleCommit(t, localRepoPath, wt, "base-only.txt", "from base\n", "base: independent change")
+	headRef, err := localRepo.Head()
+	require.NoError(t, err)
+	baseTip := headRef.Hash()
+	require.NoError(t, localRepo.Push(&git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs:   []config.RefSpec{config.RefSpec(baseTip.String() + ":refs/heads/main")},
+		Force:      true,
+	}))
+	// Move local main behind the new remote tip so land must fast-forward to it.
+	require.NoError(t, localRepo.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), squash)))
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("main")}))
+
+	landCmd := &LandCmd{Remote: remoteName}
+	restore := mockInput("y")
+	out, err := CaptureOutput(func() error { return landCmd.Run(&kong.Context{}) })
+	restore()
+	require.NoError(t, err, "land must not conflict thanks to -X ours.\nOutput:\n%s", out)
+	require.Contains(t, out, "auto-resolve", "land should report auto-resolving squash-duplication conflicts")
+
+	// Tower now has only b1.
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	tower := findTowerByName(cfg.Repos[0], "sq")
+	require.Len(t, tower.Branches, 1)
+	require.Equal(t, "b1", tower.Branches[0].Name)
+
+	// b1 keeps ITS version of the conflicting file (ours).
+	require.Equal(t, "b0 line\nb1 addition\n", showFile("b1", "shared.txt"))
+	require.Equal(t, "b1 only\n", showFile("b1", "b1-only.txt"))
+	// The genuine base-only change WAS applied (not dropped by -X ours).
+	require.Equal(t, "from base\n", showFile("b1", "base-only.txt"))
+	// And the double-diff is gone: merge-base(b1, main) == new main tip.
+	require.Equal(t, baseTip.String(), mergeBase(t, localRepoPath, "b1", "main"))
+}

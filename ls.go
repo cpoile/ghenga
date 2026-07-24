@@ -211,8 +211,27 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 				}
 			}
 
-			// Display commits using git CLI (go-git r.Log() doesn't work in worktrees)
-			allCommits, err := getLogCommits(branchRef.Hash(), MAX_COMMITS_PER_BRANCH_TO_DISPLAY+1)
+			// Display commits using git CLI (go-git r.Log() doesn't work in worktrees).
+			// Use the "below..this" range so the list stays correct when merge commits
+			// interleave the lower branch's tip into a linear, date-ordered log — which
+			// would otherwise make the walk below stop early and hide this branch's work.
+			var allCommits []CommitInfo
+			switch {
+			case i > 0 && foundStopCommit && !hasDiverged:
+				// Upper branch that fully contains the one below: list its unique commits.
+				allCommits, err = getRangeCommits(stopAtCommit, branchRef.Hash(), MAX_COMMITS_PER_BRANCH_TO_DISPLAY+1)
+			case i == 0 && !calculatedBaseCommit.IsZero():
+				// Bottom branch: list commits ahead of the merge-base with the tower base,
+				// then append the merge-base commit itself so it renders with its marker.
+				allCommits, err = getRangeCommits(calculatedBaseCommit, branchRef.Hash(), MAX_COMMITS_PER_BRANCH_TO_DISPLAY+1)
+				if err == nil {
+					if mb, mbErr := getLogCommits(calculatedBaseCommit, 1); mbErr == nil && len(mb) > 0 {
+						allCommits = append(allCommits, mb[0])
+					}
+				}
+			default:
+				allCommits, err = getLogCommits(branchRef.Hash(), MAX_COMMITS_PER_BRANCH_TO_DISPLAY+1)
+			}
 			if err != nil {
 				continue
 			}
@@ -242,10 +261,16 @@ func (l *LsCmd) Run(_ *kong.Context) error {
 				commit := commits[j]
 
 				if hasDiverged && commit.Hash == divergencePoint {
-					divergedColor.Printf("    ⚠️ This branch has diverged ↓↓ here ↓↓ from the branch below. Run 'ghenga rebase' to fix.\n")
-					branchColor.Printf("        If the branch below has been rebased onto its merge-base, you can run\n")
-					branchColor.Printf("        'ghenga rebase from %s [commit-hash]' to rebase this branch onto the branch below.\n", branch.Name)
-					branchColor.Printf("        Use the commit hash from %s that is the first unique commit after the branch below.\n", branch.Name)
+					fixCmd := "ghenga rebase"
+					if tower.strategy() == StrategyMerge {
+						fixCmd = "ghenga merge"
+					}
+					divergedColor.Printf("    ⚠️ This branch has diverged ↓↓ here ↓↓ from the branch below. Run '%s' to fix.\n", fixCmd)
+					if tower.strategy() != StrategyMerge {
+						branchColor.Printf("        If the branch below has been rebased onto its merge-base, you can run\n")
+						branchColor.Printf("        'ghenga rebase from %s [commit-hash]' to rebase this branch onto the branch below.\n", branch.Name)
+						branchColor.Printf("        Use the commit hash from %s that is the first unique commit after the branch below.\n", branch.Name)
+					}
 					divergedColor.Printf("    %s %s\n", commit.Hash.String()[:7], commit.Message)
 					break
 				}

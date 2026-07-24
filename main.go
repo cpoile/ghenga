@@ -87,6 +87,7 @@ type CLI struct {
 	Current    CurrentCmd    `cmd:"current" help:"Set the current tower"`
 	Rename     RenameCmd     `cmd:"rename" help:"Rename the current tower"`
 	Base       BaseCmd       `cmd:"base" help:"Set the tower's base branch"`
+	Strategy   StrategyCmd   `cmd:"strategy" help:"Set the current tower's strategy (merge or rebase)"`
 	TowerRm    RmTowerCmd    `cmd:"tower-rm" help:"Remove the specified tower"`
 	Rebase     RebaseCmd     `cmd:"rebase" help:"Rebase divergent tower branches (use 'rebase undo' to undo)"`
 	Merge      MergeCmd      `cmd:"merge" help:"Merge each branch's base down into it for merge-strategy towers (use 'merge undo' to undo)"`

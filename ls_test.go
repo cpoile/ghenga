@@ -910,3 +910,46 @@ func TestLsCmd_FromWorktree_MergeBase(t *testing.T) {
 	// Verify the merge-base marker appears (shows it calculated successfully)
 	assert.Contains(t, lsOutput, "(merge-base with main)")
 }
+
+// TestLsCmd_MergeStrategyShowsAllCommits guards against a regression where ls
+// truncated a branch's commit list after a merge-down: because each branch gains a
+// merge commit whose second parent is the (newer) branch below, a linear date-
+// ordered log hits the lower branch's tip first and stops. ls must instead list
+// the commits unique to each branch (lower..this), so a branch's own work stays
+// visible even with merge commits on top.
+func TestLsCmd_MergeStrategyShowsAllCommits(t *testing.T) {
+	repoPath, repo, cleanup := setupTestEnv(t)
+	defer cleanup()
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("b0"), Create: true}))
+	addSingleCommit(t, repoPath, wt, "b0.txt", "b0\n", "b0 unique work")
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("b1"), Create: true}))
+	addSingleCommit(t, repoPath, wt, "b1.txt", "b1\n", "b1 unique work")
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("b2"), Create: true}))
+	addSingleCommit(t, repoPath, wt, "b2.txt", "b2\n", "b2 unique work")
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("main")}))
+
+	towers := []*Tower{{
+		Name: "t", Strategy: StrategyMerge, Base: "main",
+		Branches: []Branch{{Name: "b0"}, {Name: "b1"}, {Name: "b2"}},
+	}}
+	require.NoError(t, SaveConfig(createTestConfig(t, repoPath, "t", towers, "main")))
+
+	// Advance the base (main) so the whole stack diverges, then merge it down. This
+	// gives EVERY branch — including the bottom one (b0) — a merge commit, which is
+	// the topology that previously truncated the ls display.
+	require.NoError(t, wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("main")}))
+	addSingleCommit(t, repoPath, wt, "main.txt", "main moved\n", "independent base change")
+	_, err = CaptureOutput(func() error { return mergeTowerWithMode(MergeModeNormal, true, "", "") })
+	require.NoError(t, err)
+
+	out, err := CaptureOutput(func() error { return (&LsCmd{}).Run(&kong.Context{}) })
+	require.NoError(t, err)
+	// Each branch's own commit must still be listed, not hidden behind its merge commit
+	// — including the bottom branch, which renders via a different code path.
+	require.Contains(t, out, "b0 unique work", "bottom branch's own commit must show, not just its merge commit")
+	require.Contains(t, out, "b1 unique work", "b1's own commit must show, not just its merge commit")
+	require.Contains(t, out, "b2 unique work", "b2's own commit must show, not just its merge commit")
+}

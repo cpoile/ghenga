@@ -100,7 +100,10 @@ func (m *MergeContinueCmd) Run(_ *kong.Context) error {
 	//       'git merge --continue' will say "no merge in progress" — we detect
 	//       this and treat it as a success the same way rebase does.
 	fmt.Printf("Finishing merge of '%s' into '%s'...\n", state.BaseBranch, state.TargetBranch)
-	continueOutput, continueErr := runGitCommandWithRetry(repoPath, "merge", "--continue")
+	// GIT_EDITOR=true: 'git merge --continue' commits with the prepared MERGE_MSG and
+	// takes no message args, so we suppress its editor with a no-op rather than letting
+	// it launch one (which hangs, since git's output is captured, not on a terminal).
+	continueOutput, continueErr := runGitCommandWithRetryEnv(repoPath, []string{"GIT_EDITOR=true"}, "merge", "--continue")
 	needsManualCommitHandling := false
 	if continueErr != nil {
 		outStr := string(continueOutput)
@@ -402,6 +405,21 @@ func restoreTowerToReflog(strategy string) error {
 //
 // Returns errMergePaused when a merge conflict stops the operation.
 func mergeTowerWithMode(mode MergeMode, skipConfirmation bool, partialBranch string, resetNewBase string) error {
+	return mergeTowerWithOptions(mode, skipConfirmation, partialBranch, resetNewBase, false)
+}
+
+// mergeTowerWithOptions is mergeTowerWithMode plus firstBranchOurs: when true, the
+// FIRST branch's merge uses 'git merge -X ours' so that squash-duplication
+// conflicts auto-resolve in favor of the branch. A squash-merge lands the bottom
+// branch as a brand-new commit on the base whose tree matches the branch but whose
+// identity does not, so git re-applies those changes from the base side and they
+// collide with the same changes the upper branch already contains. 'land' sets
+// this flag only after verifying the landed branch is an ancestor of the first
+// remaining branch — so every such conflict is a duplicate the branch already
+// holds. Genuine base-only changes are non-conflicting and are still applied.
+// Only the first branch needs it: subsequent branches merge their already-updated
+// predecessor, which introduces no new tree changes, so a plain merge stays clean.
+func mergeTowerWithOptions(mode MergeMode, skipConfirmation bool, partialBranch string, resetNewBase string, firstBranchOurs bool) error {
 	config, _, currentTower, repoPath, err := loadRepoInfoAndCurrentTower()
 	if err != nil {
 		return err
@@ -654,6 +672,7 @@ func mergeTowerWithMode(mode MergeMode, skipConfirmation bool, partialBranch str
 	fmt.Println("----------------------------------------")
 
 	// --- Execute merges sequentially ---
+	firstItem := true
 	for len(remaining) > 0 {
 		cur := remaining[0]
 		fmt.Printf("Merging '%s' into '%s'...\n", cur.BaseBranchName, cur.Name)
@@ -664,7 +683,15 @@ func mergeTowerWithMode(mode MergeMode, skipConfirmation bool, partialBranch str
 			return fmt.Errorf("failed to checkout '%s' (detached): %w", cur.Name, err)
 		}
 
-		mergeOutput, mergeErr := runGitCommandWithRetry(repoPath, "merge", "--no-edit", cur.BaseBranchName)
+		mergeArgs := []string{"merge", "--no-edit"}
+		if firstItem && firstBranchOurs {
+			mergeArgs = append(mergeArgs, "-X", "ours")
+			fmt.Printf("  (auto-resolving squash-duplication conflicts in favor of '%s')\n", cur.Name)
+		}
+		mergeArgs = append(mergeArgs, cur.BaseBranchName)
+		firstItem = false
+
+		mergeOutput, mergeErr := runGitCommandWithRetry(repoPath, mergeArgs...)
 		if mergeErr != nil {
 			// Conflict: save state and pause.
 			conflictColor := color.New(color.FgRed).Add(color.Bold)
@@ -720,6 +747,58 @@ func mergeTowerWithMode(mode MergeMode, skipConfirmation bool, partialBranch str
 	}
 
 	return nil
+}
+
+// branchContains reports whether ancestor is an ancestor of (i.e. fully contained
+// in) descendant. 'land' uses it to confirm a just-landed branch is already held by
+// the first remaining branch, which makes a '-X ours' merge of the squashed base
+// safe. Returns false on any error (missing branch, etc.) so callers fall back to a
+// plain merge.
+func branchContains(repoPath, ancestor, descendant string) bool {
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = repoPath
+	return cmd.Run() == nil
+}
+
+// mergeWouldBeCleanWithBase dry-runs a 3-way merge of theirs into ours using
+// explicitMergeBase as the merge base, via 'git merge-tree --write-tree'. It
+// returns (clean, supported): clean is true when the merge has no conflicts;
+// supported is false when this git build lacks the required flags or the refs are
+// unusable, in which case callers must NOT assume the merge is safe.
+//
+// 'land' calls this with the landed branch as the merge base. Relative to that
+// base, the squash-duplicated content is unchanged on the base side, so it never
+// conflicts — while genuine changes the base made beyond the landed branch still
+// surface as conflicts. So a clean result here means every conflict a plain merge
+// would raise is a pure squash duplication that '-X ours' can safely absorb.
+func mergeWouldBeCleanWithBase(repoPath, explicitMergeBase, ours, theirs string) (clean bool, supported bool) {
+	cmd := exec.Command("git", "merge-tree", "--write-tree",
+		"--merge-base="+explicitMergeBase, ours, theirs)
+	cmd.Dir = repoPath
+	err := cmd.Run()
+	if err == nil {
+		return true, true // exit 0 => no conflicts
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return false, true // exit 1 => genuine conflicts
+	}
+	return false, false // unknown flag (old git) / bad ref => uncertain, treat as unsafe
+}
+
+// mergeBaseOf returns the short merge-base hash of two refs, for transparent
+// logging of which common ancestor a merge will use.
+func mergeBaseOf(repoPath, ref1, ref2 string) (string, error) {
+	cmd := exec.Command("git", "merge-base", ref1, ref2)
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	h := strings.TrimSpace(string(out))
+	if len(h) > 7 {
+		h = h[:7]
+	}
+	return h, nil
 }
 
 // updateRefToHead advances the named branch pointer to HEAD using git update-ref.

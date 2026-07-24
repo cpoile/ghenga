@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -326,6 +327,43 @@ func getLogCommits(fromHash plumbing.Hash, maxCount int) ([]CommitInfo, error) {
 	return commits, nil
 }
 
+// getRangeCommits returns the commits reachable from toHash but not from fromHash
+// (git's "fromHash..toHash" range), newest first. This is topology-correct for
+// branches that contain merge commits — unlike walking a linear log and stopping
+// at the first sighting of fromHash, which truncates early when a merge commit
+// pulls the lower branch's tip in as a second parent.
+func getRangeCommits(fromHash, toHash plumbing.Hash, maxCount int) ([]CommitInfo, error) {
+	rangeArg := fromHash.String() + ".." + toHash.String()
+	args := []string{"log", "--format=%H %s", rangeArg}
+	if maxCount > 0 {
+		args = []string{"log", fmt.Sprintf("-n%d", maxCount), "--format=%H %s", rangeArg}
+	}
+
+	cmd := exec.Command("git", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git log range failed: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	commits := make([]CommitInfo, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) < 1 {
+			continue
+		}
+		message := ""
+		if len(parts) > 1 {
+			message = parts[1]
+		}
+		commits = append(commits, CommitInfo{Hash: plumbing.NewHash(parts[0]), Message: message})
+	}
+	return commits, nil
+}
+
 // detectDefaultBranch attempts to determine the default branch name for the repository.
 // Uses CLI instead of go-git because go-git doesn't work properly in worktrees.
 func detectDefaultBranch(r *git.Repository) string {
@@ -456,12 +494,24 @@ func isWorkingDirectoryClean(r *git.Repository) error {
 
 // runGitCommandWithRetry executes a git command with retry logic for lock file errors
 func runGitCommandWithRetry(repoPath string, args ...string) ([]byte, error) {
+	return runGitCommandWithRetryEnv(repoPath, nil, args...)
+}
+
+// runGitCommandWithRetryEnv is runGitCommandWithRetry with extra environment
+// variables appended to the inherited environment. Used to suppress the merge
+// commit editor (GIT_EDITOR=true) on 'git merge --continue', which otherwise
+// launches an interactive editor and hangs because ghenga captures git's output
+// rather than handing it a terminal.
+func runGitCommandWithRetryEnv(repoPath string, extraEnv []string, args ...string) ([]byte, error) {
 	maxRetries := 10
 	baseSleepMs := 100
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = repoPath
+		if len(extraEnv) > 0 {
+			cmd.Env = append(os.Environ(), extraEnv...)
+		}
 		output, err := cmd.CombinedOutput()
 
 		if err == nil {

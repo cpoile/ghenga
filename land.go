@@ -173,10 +173,45 @@ func (l *LandCmd) Run(ctx *kong.Context) error {
 	if currentTower.strategy() == StrategyMerge {
 		// Merge strategy: merge the updated base down into each remaining branch. This adds a merge
 		// commit to each branch but preserves existing commit hashes so reviewers keep GitHub state.
-		// Pass resetNewBase="" so mergeTowerWithMode uses tower.Base (already fast-forwarded above)
-		// as the merge source for the first remaining branch, then chains upward.
+		// Pass resetNewBase="" so the engine uses tower.Base (already fast-forwarded above) as the
+		// merge source for the first remaining branch, then chains upward.
+		//
+		// A squash-merge re-introduces the landed branch's changes as one new commit on the base. The
+		// first remaining branch was stacked on the landed branch, so it already contains those
+		// changes — but git can't match the squash to the original commits and raises duplication
+		// conflicts. We auto-resolve those in the branch's favor (-X ours) ONLY when it is provably
+		// safe: (1) the first remaining branch actually contains the landed branch, and (2) a dry-run
+		// merge using the landed branch as the explicit base is conflict-free. Condition (2) is the
+		// crucial guard — relative to the landed branch the squash duplication is a no-op, so any
+		// conflict there is a *genuine* change the base made beyond the landed branch, which must NOT
+		// be silently overridden. When either check fails we fall back to a plain, pausing merge.
+		firstRemaining := currentTower.Branches[0].Name
+		firstBranchOurs := false
+		if branchContains(repoPath, landedBranchName, firstRemaining) {
+			clean, supported := mergeWouldBeCleanWithBase(repoPath, landedBranchName, firstRemaining, currentTower.Base)
+			switch {
+			case supported && clean:
+				firstBranchOurs = true
+				mb, mbErr := mergeBaseOf(repoPath, firstRemaining, currentTower.Base)
+				if mbErr == nil {
+					fmt.Printf("  Verified '%s' contains landed branch '%s' and the base adds no conflicting\n", firstRemaining, landedBranchName)
+					fmt.Printf("  changes over it (merge-base with '%s' is %s); squash-duplication conflicts will auto-resolve.\n", currentTower.Base, mb)
+				} else {
+					fmt.Printf("  Verified '%s' contains landed branch '%s' with no conflicting base changes; squash-duplication conflicts will auto-resolve.\n", firstRemaining, landedBranchName)
+				}
+			case supported && !clean:
+				fmt.Printf("  Note: '%s' contains landed branch '%s', but the base has changes that genuinely conflict;\n", firstRemaining, landedBranchName)
+				fmt.Printf("  using a plain merge so you can resolve them.\n")
+			default:
+				fmt.Printf("  Note: could not verify it is safe to auto-resolve for '%s'; using a plain merge.\n", firstRemaining)
+			}
+		} else {
+			fmt.Printf("  Note: could not confirm '%s' contains landed branch '%s' (deleted locally?); using a plain merge.\n",
+				firstRemaining, landedBranchName)
+		}
+
 		fmt.Printf("  Merging updated base into remaining branches in tower '%s'...\n", currentTower.Name)
-		err = mergeTowerWithMode(MergeModeReset, true, "", "")
+		err = mergeTowerWithOptions(MergeModeReset, true, "", "", firstBranchOurs)
 		if err == errMergePaused {
 			fmt.Printf("\nLand operation paused due to merge conflicts.\n")
 			fmt.Printf("Resolve conflicts and run 'ghenga merge continue' to complete the landing,\n")
